@@ -88,10 +88,14 @@ fn simple_glob(pattern: &str, text: &str) -> bool {
                 // Try matching the rest of the pattern at every position
                 let remaining_pattern: String = pi.clone().collect();
                 let remaining_text: String = ti.clone().collect();
-                for i in 0..=remaining_text.len() {
+                for (i, _) in remaining_text.char_indices() {
                     if simple_glob(&remaining_pattern, &remaining_text[i..]) {
                         return true;
                     }
+                }
+                // Also try matching at the very end (empty string)
+                if simple_glob(&remaining_pattern, "") {
+                    return true;
                 }
                 return false;
             }
@@ -162,5 +166,13 @@ mod tests {
             "some/path/readme.md",
             &["thumbs.db".into()]
         ));
+    }
+
+    #[test]
+    fn test_glob_with_combining_unicode() {
+        // ä as a + combining umlaut (U+0308) — multi-byte char boundary
+        let name = "Solidarita\u{308}tsanlass_24.2.2026.jpg";
+        assert!(matches_exclude(name, &["*.jpg".into()]));
+        assert!(!matches_exclude(name, &["*.png".into()]));
     }
 }

@@ -64,7 +64,7 @@ impl Default for GeneralConfig {
 }
 
 fn default_full_sync_interval() -> u64 {
-    300
+    86400
 }
 fn default_debounce_ms() -> u64 {
     2000

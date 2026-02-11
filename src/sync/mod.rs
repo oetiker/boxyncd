@@ -18,7 +18,22 @@ use crate::config::Config;
 use crate::util::{hash, path as sync_path};
 
 use reconciler::{LocalEntry, RemoteEntry, SyncAction};
+pub use remote_watcher::RemoteEvent;
 use state::SyncEntry;
+
+/// Result of a sync cycle — tells the event loop whether we changed anything
+/// on Box so it can suppress the resulting remote watcher echo.
+#[derive(Debug, Default)]
+pub struct SyncOutcome {
+    /// Whether we modified anything on Box (upload, delete, create folder).
+    pub modified_remote: bool,
+}
+
+impl SyncOutcome {
+    fn merge(&mut self, other: SyncOutcome) {
+        self.modified_remote |= other.modified_remote;
+    }
+}
 
 /// The main sync engine that orchestrates full sync cycles.
 pub struct SyncEngine {
@@ -40,7 +55,8 @@ impl SyncEngine {
     }
 
     /// Run a full sync cycle across all configured sync roots.
-    pub async fn run_full_sync(&self) -> Result<()> {
+    pub async fn run_full_sync(&self) -> Result<SyncOutcome> {
+        let mut outcome = SyncOutcome::default();
         for (index, root) in self.config.sync.iter().enumerate() {
             let root_index = index as i64;
             tracing::info!(
@@ -49,24 +65,22 @@ impl SyncEngine {
                 "syncing root {}/{}", index + 1, self.config.sync.len(),
             );
 
-            if let Err(e) = self.sync_root(root_index).await {
-                tracing::error!(
-                    root = %root.local_path.display(),
-                    error = %e,
-                    "sync root failed"
-                );
+            match self.sync_root(root_index).await {
+                Ok(root_outcome) => outcome.merge(root_outcome),
+                Err(e) => {
+                    tracing::error!(
+                        root = %root.local_path.display(),
+                        error = %e,
+                        "sync root failed"
+                    );
+                }
             }
         }
-        Ok(())
-    }
-
-    /// Sync a single root by index (public entry point for incremental sync).
-    pub async fn sync_one_root(&self, root_index: i64) -> Result<()> {
-        self.sync_root(root_index).await
+        Ok(outcome)
     }
 
     /// Sync a single root: walk remote, walk local, reconcile, execute.
-    async fn sync_root(&self, root_index: i64) -> Result<()> {
+    async fn sync_root(&self, root_index: i64) -> Result<SyncOutcome> {
         let root = &self.config.sync[root_index as usize];
         let base_path = &root.local_path;
 
@@ -82,28 +96,32 @@ impl SyncEngine {
             .await?;
         tracing::debug!(count = remote_tree.len(), "remote entries found");
 
-        // 2. Walk the local tree
-        tracing::debug!("walking local tree");
-        let local_tree = self.walk_local_tree(base_path, &root.exclude).await?;
-        tracing::debug!(count = local_tree.len(), "local entries found");
-
-        // 3. Load DB baseline
+        // 2. Load DB baseline (needed before local walk for ctime optimisation)
         let db_entries = state::get_all_for_root(&self.pool, root_index).await?;
         tracing::debug!(count = db_entries.len(), "DB entries loaded");
+        let db_by_path: std::collections::HashMap<&str, &SyncEntry> = db_entries
+            .iter()
+            .map(|e| (e.relative_path.as_str(), e))
+            .collect();
+
+        // 3. Walk the local tree (skips SHA1 for files unchanged since last sync)
+        tracing::debug!("walking local tree");
+        let local_tree = self
+            .walk_local_tree(base_path, &root.exclude, &db_by_path)
+            .await?;
+        tracing::debug!(count = local_tree.len(), "local entries found");
 
         // 4. Reconcile
         let actions = reconciler::reconcile(&local_tree, &remote_tree, &db_entries);
         if actions.is_empty() {
             tracing::info!("everything in sync");
-            return Ok(());
+            return Ok(SyncOutcome::default());
         }
         tracing::info!(count = actions.len(), "actions to execute");
 
         // 5. Execute actions
         self.execute_actions(root_index, &actions, base_path, &remote_tree, &local_tree)
-            .await?;
-
-        Ok(())
+            .await
     }
 
     /// Recursively walk the remote Box folder tree, building a flat list of RemoteEntry.
@@ -171,13 +189,16 @@ impl SyncEngine {
     }
 
     /// Recursively walk the local directory tree, building a flat list of LocalEntry.
-    async fn walk_local_tree(
+    /// Uses DB entries to skip SHA1 computation for files unchanged since last sync
+    /// (based on inode ctime), avoiding unnecessary file reads and inotify noise.
+    async fn walk_local_tree<'a>(
         &self,
         base_path: &Path,
         exclude: &[String],
+        db_by_path: &std::collections::HashMap<&'a str, &'a SyncEntry>,
     ) -> Result<Vec<LocalEntry>> {
         let mut entries = Vec::new();
-        self.walk_local_dir(base_path, base_path, exclude, &mut entries)
+        self.walk_local_dir(base_path, base_path, exclude, &mut entries, db_by_path)
             .await?;
         Ok(entries)
     }
@@ -188,6 +209,7 @@ impl SyncEngine {
         dir: &'a Path,
         exclude: &'a [String],
         entries: &'a mut Vec<LocalEntry>,
+        db_by_path: &'a std::collections::HashMap<&'a str, &'a SyncEntry>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
         Box::pin(async move {
             let mut read_dir = tokio::fs::read_dir(dir)
@@ -228,7 +250,7 @@ impl SyncEngine {
                     });
 
                     // Recurse
-                    self.walk_local_dir(base_path, &path, exclude, entries)
+                    self.walk_local_dir(base_path, &path, exclude, entries, db_by_path)
                         .await?;
                 } else if meta.is_file() {
                     let size = meta.len();
@@ -244,12 +266,20 @@ impl SyncEngine {
                             .to_rfc3339()
                     };
 
-                    // Compute SHA-1 for content comparison
-                    let sha1 = match hash::compute_sha1(&path).await {
-                        Ok(h) => Some(h),
-                        Err(e) => {
-                            tracing::warn!(path = %relative, error = %e, "SHA-1 failed, skipping");
-                            continue;
+                    // If the file's inode hasn't changed since the last sync
+                    // (ctime <= last_sync_at), reuse the cached SHA1 from the DB
+                    // instead of reading the file — avoids I/O and inotify noise.
+                    let sha1 = if let Some(cached) = cached_sha1(&meta, &relative, db_by_path) {
+                        cached
+                    } else {
+                        match hash::compute_sha1(&path).await {
+                            Ok(h) => Some(h),
+                            Err(e) => {
+                                tracing::warn!(
+                                    path = %relative, error = %e, "SHA-1 failed, skipping"
+                                );
+                                continue;
+                            }
                         }
                     };
 
@@ -267,7 +297,7 @@ impl SyncEngine {
         })
     }
 
-    /// Execute a list of sync actions.
+    /// Execute a list of sync actions, returning what was touched for echo suppression.
     async fn execute_actions(
         &self,
         root_index: i64,
@@ -275,31 +305,46 @@ impl SyncEngine {
         base_path: &Path,
         remote_tree: &[RemoteEntry],
         local_tree: &[LocalEntry],
-    ) -> Result<()> {
+    ) -> Result<SyncOutcome> {
         // Build a lookup for remote entries (to resolve parent IDs)
         let remote_by_path: std::collections::HashMap<&str, &RemoteEntry> = remote_tree
             .iter()
             .map(|e| (e.relative_path.as_str(), e))
             .collect();
 
+        let mut outcome = SyncOutcome::default();
+
         for action in actions {
             let _permit = self.semaphore.acquire().await?;
 
-            if let Err(e) = self
+            match self
                 .execute_action(action, root_index, base_path, &remote_by_path, local_tree)
                 .await
             {
-                tracing::error!(error = %e, action = ?action, "action failed");
-                // Record the error for the relevant entry, but continue with other actions
-                if let Some(path) = action_path(action)
-                    && let Ok(Some(entry)) = state::get_by_path(&self.pool, root_index, path).await
-                {
-                    let _ = state::set_error(&self.pool, entry.id, &format!("{e:#}")).await;
+                Ok(()) => {
+                    if matches!(
+                        action,
+                        SyncAction::Upload { .. }
+                            | SyncAction::UploadVersion { .. }
+                            | SyncAction::DeleteRemote { .. }
+                            | SyncAction::CreateRemoteDir { .. }
+                    ) {
+                        outcome.modified_remote = true;
+                    }
+                }
+                Err(e) => {
+                    tracing::error!(error = format!("{e:#}"), action = ?action, "action failed");
+                    if let Some(path) = action_path(action)
+                        && let Ok(Some(entry)) =
+                            state::get_by_path(&self.pool, root_index, path).await
+                    {
+                        let _ = state::set_error(&self.pool, entry.id, &format!("{e:#}")).await;
+                    }
                 }
             }
         }
 
-        Ok(())
+        Ok(outcome)
     }
 
     /// Execute a single sync action.
@@ -647,6 +692,377 @@ impl SyncEngine {
             "Cannot resolve parent Box folder ID for '{relative_path}'. \
              Parent directory '{parent_rel}' not found in remote tree or DB."
         );
+    }
+
+    // ── Targeted (per-file) sync ────────────────────────────────────
+
+    /// Sync a single locally-changed file without walking the tree.
+    pub async fn sync_local_change(
+        &self,
+        root_index: i64,
+        relative_path: &str,
+    ) -> Result<SyncOutcome> {
+        let root = &self.config.sync[root_index as usize];
+        let base_path = &root.local_path;
+
+        tracing::info!(path = %relative_path, "targeted local sync");
+
+        // 1. DB baseline
+        let db_entry = state::get_by_path(&self.pool, root_index, relative_path).await?;
+
+        // 2. Local state
+        let local = self.stat_local_entry(base_path, relative_path).await;
+
+        // 3. Remote state
+        let remote = if let Some(ref db) = db_entry
+            && let Some(ref box_id) = db.box_id
+        {
+            self.fetch_remote_entry(box_id, relative_path).await?
+        } else {
+            // New local file — check if it already exists on Box
+            self.find_remote_entry(root_index, relative_path).await?
+        };
+
+        // 4. Reconcile
+        let action = reconciler::reconcile_entry(
+            relative_path,
+            local.as_ref(),
+            remote.as_ref(),
+            db_entry.as_ref(),
+        );
+
+        let Some(action) = action else {
+            tracing::debug!(path = %relative_path, "already in sync");
+            return Ok(SyncOutcome::default());
+        };
+
+        tracing::debug!(path = %relative_path, action = ?action, "targeted action");
+
+        // 5. Execute
+        self.execute_single_action(
+            root_index,
+            &action,
+            base_path,
+            remote.as_ref(),
+            local.as_ref(),
+        )
+        .await
+    }
+
+    /// Sync a single remotely-changed file without walking the tree.
+    pub async fn sync_remote_change(
+        &self,
+        root_index: i64,
+        event: &RemoteEvent,
+    ) -> Result<SyncOutcome> {
+        let root = &self.config.sync[root_index as usize];
+        let base_path = &root.local_path;
+
+        // 1. Determine relative_path
+        let relative_path = if let Some(ref box_id) = event.box_id
+            && let Some(db) = state::get_by_box_id(&self.pool, root_index, box_id).await?
+        {
+            db.relative_path.clone()
+        } else {
+            // Item not in DB — resolve from event metadata
+            match self.resolve_relative_path(root_index, event).await {
+                Some(p) => p,
+                None => {
+                    tracing::debug!(
+                        event_type = %event.event_type,
+                        box_id = ?event.box_id,
+                        "cannot resolve path for remote event, skipping"
+                    );
+                    return Ok(SyncOutcome::default());
+                }
+            }
+        };
+
+        tracing::info!(path = %relative_path, event_type = %event.event_type, "targeted remote sync");
+
+        // 2. Remote state
+        let remote = if event.event_type == "ITEM_TRASH" {
+            // We know it's gone — skip the API call
+            None
+        } else if let Some(ref box_id) = event.box_id {
+            self.fetch_remote_entry(box_id, &relative_path).await?
+        } else {
+            None
+        };
+
+        // 3. Local state
+        let local = self.stat_local_entry(base_path, &relative_path).await;
+
+        // 4. DB baseline
+        let db_entry = state::get_by_path(&self.pool, root_index, &relative_path).await?;
+
+        // 5. Reconcile
+        let action = reconciler::reconcile_entry(
+            &relative_path,
+            local.as_ref(),
+            remote.as_ref(),
+            db_entry.as_ref(),
+        );
+
+        let Some(action) = action else {
+            tracing::debug!(path = %relative_path, "already in sync");
+            return Ok(SyncOutcome::default());
+        };
+
+        tracing::debug!(path = %relative_path, action = ?action, "targeted action");
+
+        // 6. Execute
+        self.execute_single_action(
+            root_index,
+            &action,
+            base_path,
+            remote.as_ref(),
+            local.as_ref(),
+        )
+        .await
+    }
+
+    /// Stat a single local file and build a `LocalEntry` (None if it doesn't exist).
+    async fn stat_local_entry(&self, base_path: &Path, relative_path: &str) -> Option<LocalEntry> {
+        let full_path = base_path.join(relative_path);
+        let meta = tokio::fs::symlink_metadata(&full_path).await.ok()?;
+
+        if meta.is_symlink() {
+            return None;
+        }
+
+        if meta.is_dir() {
+            return Some(LocalEntry {
+                relative_path: relative_path.to_string(),
+                is_dir: true,
+                sha1: None,
+                size: 0,
+                modified_at: String::new(),
+            });
+        }
+
+        if meta.is_file() {
+            let size = meta.len();
+            let mtime = {
+                use std::time::UNIX_EPOCH;
+                let dur = meta
+                    .modified()
+                    .unwrap_or(UNIX_EPOCH)
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default();
+                chrono::DateTime::from_timestamp(dur.as_secs() as i64, dur.subsec_nanos())
+                    .unwrap_or_default()
+                    .to_rfc3339()
+            };
+            let sha1 = match hash::compute_sha1(&full_path).await {
+                Ok(h) => Some(h),
+                Err(e) => {
+                    tracing::warn!(path = %relative_path, error = %e, "SHA-1 failed");
+                    return None;
+                }
+            };
+            return Some(LocalEntry {
+                relative_path: relative_path.to_string(),
+                is_dir: false,
+                sha1,
+                size,
+                modified_at: mtime,
+            });
+        }
+
+        None
+    }
+
+    /// Fetch remote file metadata from Box and wrap as RemoteEntry.
+    /// Returns None on 404 / trashed items.
+    async fn fetch_remote_entry(
+        &self,
+        box_id: &str,
+        relative_path: &str,
+    ) -> Result<Option<RemoteEntry>> {
+        match self.client.get_file(box_id).await {
+            Ok(f) => {
+                if f.item_status.as_deref() == Some("trashed") {
+                    return Ok(None);
+                }
+                Ok(Some(RemoteEntry {
+                    relative_path: relative_path.to_string(),
+                    is_dir: false,
+                    box_id: f.id,
+                    parent_id: f.parent.map(|p| p.id).unwrap_or_default(),
+                    sha1: f.sha1,
+                    etag: f.etag,
+                    size: f.size,
+                    modified_at: f.content_modified_at.or(f.modified_at),
+                }))
+            }
+            Err(e) => {
+                let msg = format!("{e:#}");
+                if msg.contains("404") || msg.contains("not_found") {
+                    Ok(None)
+                } else {
+                    Err(e)
+                }
+            }
+        }
+    }
+
+    /// For new local files not yet in DB: resolve parent folder's box_id,
+    /// list its items, and search by name.
+    async fn find_remote_entry(
+        &self,
+        root_index: i64,
+        relative_path: &str,
+    ) -> Result<Option<RemoteEntry>> {
+        let file_name = relative_path.rsplit('/').next().unwrap_or(relative_path);
+        let parent_box_id = self
+            .resolve_parent_id_from_db(relative_path, root_index)
+            .await?;
+
+        let Some(parent_box_id) = parent_box_id else {
+            return Ok(None);
+        };
+
+        let items = self.client.list_folder_items(&parent_box_id).await?;
+        for item in &items {
+            if item.name == file_name {
+                return Ok(Some(RemoteEntry {
+                    relative_path: relative_path.to_string(),
+                    is_dir: item.is_folder(),
+                    box_id: item.id.clone(),
+                    parent_id: parent_box_id.clone(),
+                    sha1: item.sha1.clone(),
+                    etag: item.etag.clone(),
+                    size: item.size.unwrap_or(0),
+                    modified_at: item
+                        .content_modified_at
+                        .clone()
+                        .or(item.modified_at.clone()),
+                }));
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// Resolve parent box_id from DB or config (for targeted sync, no remote_by_path map).
+    async fn resolve_parent_id_from_db(
+        &self,
+        relative_path: &str,
+        root_index: i64,
+    ) -> Result<Option<String>> {
+        let parent_rel = match relative_path.rsplit_once('/') {
+            Some((parent, _)) => parent,
+            None => {
+                return Ok(Some(
+                    self.config.sync[root_index as usize].box_folder_id.clone(),
+                ));
+            }
+        };
+
+        if let Some(entry) = state::get_by_path(&self.pool, root_index, parent_rel).await?
+            && let Some(box_id) = entry.box_id
+        {
+            return Ok(Some(box_id));
+        }
+
+        Ok(None)
+    }
+
+    /// Resolve a relative_path for a remote event whose item isn't in DB.
+    async fn resolve_relative_path(&self, root_index: i64, event: &RemoteEvent) -> Option<String> {
+        let name = event.name.as_deref()?;
+        let parent_id = event.parent_id.as_deref()?;
+
+        // Check if parent_id is the root folder
+        let root_folder_id = &self.config.sync[root_index as usize].box_folder_id;
+        if parent_id == root_folder_id {
+            return Some(name.to_string());
+        }
+
+        // Look up parent in DB to get its relative_path
+        if let Ok(Some(parent_entry)) = state::get_by_box_id_any_root(&self.pool, parent_id).await {
+            return Some(format!("{}/{name}", parent_entry.relative_path));
+        }
+
+        None
+    }
+
+    /// Execute a single action for targeted sync (no full remote/local trees).
+    async fn execute_single_action(
+        &self,
+        root_index: i64,
+        action: &SyncAction,
+        base_path: &Path,
+        remote: Option<&RemoteEntry>,
+        local: Option<&LocalEntry>,
+    ) -> Result<SyncOutcome> {
+        let _permit = self.semaphore.acquire().await?;
+        let mut outcome = SyncOutcome::default();
+
+        // Build a minimal remote_by_path map for execute_action
+        let remote_vec: Vec<RemoteEntry> = remote.cloned().into_iter().collect();
+        let remote_by_path: std::collections::HashMap<&str, &RemoteEntry> = remote_vec
+            .iter()
+            .map(|e| (e.relative_path.as_str(), e))
+            .collect();
+        let local_vec: Vec<LocalEntry> = local.cloned().into_iter().collect();
+
+        match self
+            .execute_action(action, root_index, base_path, &remote_by_path, &local_vec)
+            .await
+        {
+            Ok(()) => {
+                if matches!(
+                    action,
+                    SyncAction::Upload { .. }
+                        | SyncAction::UploadVersion { .. }
+                        | SyncAction::DeleteRemote { .. }
+                        | SyncAction::CreateRemoteDir { .. }
+                ) {
+                    outcome.modified_remote = true;
+                }
+            }
+            Err(e) => {
+                tracing::error!(error = format!("{e:#}"), action = ?action, "targeted action failed");
+                if let Some(path) = action_path(action)
+                    && let Ok(Some(entry)) = state::get_by_path(&self.pool, root_index, path).await
+                {
+                    let _ = state::set_error(&self.pool, entry.id, &format!("{e:#}")).await;
+                }
+                return Err(e);
+            }
+        }
+
+        Ok(outcome)
+    }
+}
+
+/// Check whether a file's inode is unchanged since the last sync by comparing
+/// ctime (nanosecond precision) against the DB's `last_sync_at`.  If unchanged,
+/// return the cached SHA1 from the DB — avoids reading the file and generating
+/// inotify noise from the atime update.
+fn cached_sha1(
+    meta: &std::fs::Metadata,
+    relative: &str,
+    db_by_path: &std::collections::HashMap<&str, &SyncEntry>,
+) -> Option<Option<String>> {
+    use std::os::unix::fs::MetadataExt;
+
+    let entry = db_by_path.get(relative)?;
+    let sync_ns = entry
+        .last_sync_at
+        .as_ref()
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|dt| dt.timestamp() as i128 * 1_000_000_000 + dt.timestamp_subsec_nanos() as i128)?;
+
+    let file_ctime_ns = meta.ctime() as i128 * 1_000_000_000 + meta.ctime_nsec() as i128;
+
+    if file_ctime_ns <= sync_ns {
+        tracing::trace!(path = %relative, "ctime unchanged, reusing cached SHA1");
+        Some(entry.local_sha1.clone())
+    } else {
+        None
     }
 }
 

@@ -103,14 +103,17 @@ pub async fn upload_version_and_record(
     Ok(())
 }
 
-/// Convert a file's mtime to RFC 3339 string.
+/// Convert a file's mtime to RFC 3339 string (second precision, UTC).
+///
+/// Box's API rejects fractional seconds with more than 3 digits,
+/// so we truncate to whole seconds for maximum compatibility.
 fn file_mtime_rfc3339(meta: &std::fs::Metadata) -> Result<String> {
+    use chrono::SecondsFormat;
     use std::time::UNIX_EPOCH;
     let dur = meta
         .modified()?
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default();
-    let dt = chrono::DateTime::from_timestamp(dur.as_secs() as i64, dur.subsec_nanos())
-        .unwrap_or_default();
-    Ok(dt.to_rfc3339())
+    let dt = chrono::DateTime::from_timestamp(dur.as_secs() as i64, 0).unwrap_or_default();
+    Ok(dt.to_rfc3339_opts(SecondsFormat::Secs, true))
 }

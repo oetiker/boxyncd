@@ -27,7 +27,7 @@ exclude = ["*.tmp", ".git/**", "node_modules/**"]
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `general.full_sync_interval_secs` | 300 | Full reconciliation interval (seconds) |
+| `general.full_sync_interval_secs` | 86400 | Full reconciliation safety net (seconds, default: 1 day) |
 | `general.local_debounce_ms` | 2000 | Debounce delay for local filesystem events |
 | `general.max_concurrent_transfers` | 4 | Maximum concurrent uploads/downloads |
 | `auth.client_id` | *built-in* | Box app client ID (optional with release builds) |

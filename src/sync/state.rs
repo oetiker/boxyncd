@@ -149,11 +149,48 @@ pub async fn set_error(pool: &SqlitePool, entry_id: i64, error: &str) -> Result<
     Ok(())
 }
 
+/// Look up a sync entry by its Box ID (any root).
+pub async fn get_by_box_id_any_root(pool: &SqlitePool, box_id: &str) -> Result<Option<SyncEntry>> {
+    let row = sqlx::query("SELECT * FROM sync_entries WHERE box_id = ? LIMIT 1")
+        .bind(box_id)
+        .fetch_optional(pool)
+        .await
+        .context("Failed to fetch sync entry by box_id")?;
+
+    Ok(row.as_ref().map(SyncEntry::from_row))
+}
+
 /// Get stream position for a sync root.
 pub async fn get_stream_position(pool: &SqlitePool, root_index: i64) -> Result<Option<String>> {
     let row: Option<(String,)> =
         sqlx::query_as("SELECT stream_position FROM stream_positions WHERE sync_root_index = ?")
             .bind(root_index)
+            .fetch_optional(pool)
+            .await?;
+    Ok(row.map(|r| r.0))
+}
+
+/// Look up a sync entry by its Box ID and root index.
+pub async fn get_by_box_id(
+    pool: &SqlitePool,
+    root_index: i64,
+    box_id: &str,
+) -> Result<Option<SyncEntry>> {
+    let row = sqlx::query("SELECT * FROM sync_entries WHERE sync_root_index = ? AND box_id = ?")
+        .bind(root_index)
+        .bind(box_id)
+        .fetch_optional(pool)
+        .await
+        .context("Failed to fetch sync entry by box_id")?;
+
+    Ok(row.as_ref().map(SyncEntry::from_row))
+}
+
+/// Find which sync root owns an item by its Box ID.
+pub async fn find_root_by_box_id(pool: &SqlitePool, box_id: &str) -> Result<Option<i64>> {
+    let row: Option<(i64,)> =
+        sqlx::query_as("SELECT sync_root_index FROM sync_entries WHERE box_id = ? LIMIT 1")
+            .bind(box_id)
             .fetch_optional(pool)
             .await?;
     Ok(row.map(|r| r.0))

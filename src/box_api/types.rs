@@ -216,8 +216,42 @@ pub struct LongPollResponse {
 #[allow(dead_code)]
 pub struct EventStream {
     pub chunk_size: u64,
+    /// Box returns this as either a JSON string or a JSON number.
+    #[serde(deserialize_with = "string_or_number")]
     pub next_stream_position: String,
     pub entries: Vec<BoxEvent>,
+}
+
+/// Deserialize a value that may be a JSON string or a JSON number into a String.
+fn string_or_number<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de;
+
+    struct StringOrNumber;
+
+    impl<'de> de::Visitor<'de> for StringOrNumber {
+        type Value = String;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a string or a number")
+        }
+
+        fn visit_str<E: de::Error>(self, v: &str) -> Result<String, E> {
+            Ok(v.to_string())
+        }
+
+        fn visit_u64<E: de::Error>(self, v: u64) -> Result<String, E> {
+            Ok(v.to_string())
+        }
+
+        fn visit_i64<E: de::Error>(self, v: i64) -> Result<String, E> {
+            Ok(v.to_string())
+        }
+    }
+
+    deserializer.deserialize_any(StringOrNumber)
 }
 
 /// A single event from the event stream.

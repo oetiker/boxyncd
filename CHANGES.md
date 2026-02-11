@@ -4,9 +4,21 @@
 
 ### New
 
+- Show build date in `--version` output
+
 ### Changed
 
+- Incremental sync now operates on individual files instead of walking entire trees, reducing inotify noise and API calls
+- Example config shows how to find a Box folder's ID from its URL
+- Change default full sync interval from 5 minutes to 1 day (real-time watchers handle changes)
+
 ### Fixed
+
+- Fix panic on filenames with Unicode combining characters (e.g. `ä` as `a` + combining umlaut)
+- Fix upload failures caused by nanosecond-precision timestamps rejected by Box API
+- Show full error chain in action failure logs
+- Fix remote event watcher crash when Box returns stream position as number instead of string
+- Fix sync feedback loop: exact path-based echo suppression instead of time-based cooldown
 
 ## 0.2.2 - 2026-02-11
 
@@ -16,6 +28,7 @@
 - `boxyncd auth` works without a config file when built-in credentials are available
 - Auto-create config file from built-in template when missing (interactive prompt)
 - Add `Cross.toml` to pass credentials through to cross-compilation containers
+
 ### Changed
 
 - `[auth]` section in config is now optional — release builds use built-in credentials

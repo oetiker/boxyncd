@@ -3,8 +3,10 @@
 # Then run `boxyncd auth` to authenticate with Box.com.
 
 [general]
-# How often to run a full reconciliation pass (seconds)
-full_sync_interval_secs = 300
+# How often to run a full reconciliation pass (seconds, default: 86400 = 1 day)
+# Real-time changes are picked up by inotify and Box event stream.
+# This is a safety net for any missed events.
+full_sync_interval_secs = 86400
 # Debounce delay for local filesystem events (milliseconds)
 local_debounce_ms = 2000
 # Log level: trace, debug, info, warn, error
@@ -24,6 +26,8 @@ max_concurrent_transfers = 4
 
 # Each [[sync]] block maps a local folder to a Box folder.
 # box_folder_id "0" is the root of the user's Box account.
+# To find a folder's ID, open it in Box and look at the end of the URL:
+#   https://app.box.com/folder/123456789  →  box_folder_id = "123456789"
 
 [[sync]]
 local_path = "/home/user/BoxSync"

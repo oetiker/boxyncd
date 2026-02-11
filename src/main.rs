@@ -16,7 +16,7 @@ mod util;
 #[derive(Parser)]
 #[command(
     name = "boxyncd",
-    version,
+    version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("BUILD_DATE"), ")"),
     about = "Bidirectional Box.com file sync daemon for Linux"
 )]
 struct Cli {
@@ -115,6 +115,56 @@ async fn cleanup_stale_operations(pool: &sqlx::SqlitePool) -> Result<()> {
     Ok(())
 }
 
+/// Check whether a local change event is just an echo (e.g. from our own tree
+/// walk updating atime). Uses the inode change time (ctime) — it cannot be set
+/// by user-space, so if ctime predates the last sync the file is truly unchanged.
+///
+/// Returns `Some(relative_path)` if the change is real, `None` if it's an echo.
+async fn check_local_change(
+    pool: &sqlx::SqlitePool,
+    cfg: &config::Config,
+    change: &sync::local_watcher::LocalChange,
+) -> Option<String> {
+    use std::os::unix::fs::MetadataExt;
+
+    let root = &cfg.sync[change.root_index];
+    let base_path = &root.local_path;
+
+    let relative = match change.path.strip_prefix(base_path) {
+        Ok(r) if r.as_os_str().is_empty() => return None, // sync root dir itself
+        Ok(r) => r.to_string_lossy().into_owned(),
+        Err(_) => return Some(String::new()), // shouldn't happen, let caller handle
+    };
+
+    let meta = tokio::fs::symlink_metadata(&change.path).await.ok();
+    let db_entry = sync::state::get_by_path(pool, change.root_index as i64, &relative)
+        .await
+        .ok()
+        .flatten();
+
+    let is_echo = match (meta, db_entry) {
+        // Tracked entry: compare ctime (nanosecond precision) against last_sync_at
+        (Some(m), Some(entry)) => {
+            let file_ctime_ns = m.ctime() as i128 * 1_000_000_000 + m.ctime_nsec() as i128;
+            let sync_ns = entry
+                .last_sync_at
+                .as_ref()
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .map(|dt| {
+                    dt.timestamp() as i128 * 1_000_000_000 + dt.timestamp_subsec_nanos() as i128
+                })
+                .unwrap_or(0);
+            file_ctime_ns <= sync_ns
+        }
+        // Deleted and already removed from DB → echo from our own delete
+        (None, None) => true,
+        // New file or deletion not yet processed → real change
+        _ => false,
+    };
+
+    if is_echo { None } else { Some(relative) }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -174,12 +224,14 @@ async fn main() -> Result<()> {
             let (mut local_rx, _watcher_handle) =
                 sync::local_watcher::start_local_watchers(&roots, cfg.general.local_debounce_ms)?;
 
-            // Start remote event watchers
+            // Start remote event watcher (single global watcher for all roots)
             let cancel = tokio_util::sync::CancellationToken::new();
-            let mut remote_rx = sync::remote_watcher::start_remote_watchers(
+            let box_folder_ids: Vec<String> =
+                cfg.sync.iter().map(|r| r.box_folder_id.clone()).collect();
+            let mut remote_rx = sync::remote_watcher::start_remote_watcher(
                 client,
                 pool.clone(),
-                cfg.sync.len(),
+                box_folder_ids,
                 cancel.clone(),
             );
 
@@ -191,11 +243,24 @@ async fn main() -> Result<()> {
             let interval = cfg.general.full_sync_interval_secs;
             tracing::info!(interval_secs = interval, "entering sync loop");
 
-            let mut pending_roots = std::collections::HashSet::new();
+            // Per-file pending sets for targeted incremental sync
+            let mut pending_local: std::collections::HashSet<(usize, String)> =
+                std::collections::HashSet::new();
+            // Keyed by (root_index, box_id) to deduplicate — Box fires many
+            // events per action (thumbnail generation, indexing, etc.).
+            let mut pending_remote: std::collections::HashMap<(usize, String), sync::RemoteEvent> =
+                std::collections::HashMap::new();
+
             let mut sync_timer = tokio::time::interval(std::time::Duration::from_secs(interval));
             sync_timer.tick().await; // consume the initial instant tick
 
+            // Remote echo suppression: after uploading/deleting on Box, suppress
+            // the next remote watcher event for that root.
+            let mut suppressed_remote: std::collections::HashSet<usize> =
+                std::collections::HashSet::new();
+
             loop {
+                let has_pending = !pending_local.is_empty() || !pending_remote.is_empty();
                 tokio::select! {
                     _ = tokio::signal::ctrl_c() => {
                         tracing::info!("received SIGINT, shutting down");
@@ -209,46 +274,117 @@ async fn main() -> Result<()> {
                         break;
                     }
 
-                    // Local change detected
+                    // Local change detected — check if the file actually changed
                     Some(change) = local_rx.recv() => {
-                        tracing::debug!(
-                            root_index = change.root_index,
-                            path = %change.path.display(),
-                            "local change detected"
-                        );
-                        pending_roots.insert(change.root_index);
+                        if let Some(relative_path) = check_local_change(&pool, &cfg, &change).await {
+                            tracing::debug!(
+                                root_index = change.root_index,
+                                path = %relative_path,
+                                "local change detected"
+                            );
+                            pending_local.insert((change.root_index, relative_path));
+                        } else {
+                            tracing::debug!(
+                                path = %change.path.display(),
+                                "ignoring unchanged path"
+                            );
+                        }
                     }
 
                     // Remote change detected
                     Some(change) = remote_rx.recv() => {
-                        tracing::debug!(
-                            root_index = change.root_index,
-                            "remote change signal received"
-                        );
-                        pending_roots.insert(change.root_index);
+                        if suppressed_remote.remove(&change.root_index) {
+                            tracing::debug!(
+                                root_index = change.root_index,
+                                "suppressing remote echo from own sync"
+                            );
+                        } else {
+                            tracing::debug!(
+                                root_index = change.root_index,
+                                event_count = change.events.len(),
+                                "remote change signal received"
+                            );
+                            for event in change.events {
+                                if let Some(ref box_id) = event.box_id {
+                                    // Dedup: keep latest event per (root, box_id)
+                                    pending_remote.insert(
+                                        (change.root_index, box_id.clone()),
+                                        event,
+                                    );
+                                }
+                            }
+                        }
                     }
 
                     // Periodic full sync timer
                     _ = sync_timer.tick() => {
                         tracing::debug!("periodic full sync");
-                        if let Err(e) = engine.run_full_sync().await {
-                            tracing::error!(error = %e, "periodic sync failed");
+                        suppressed_remote.clear();
+                        match engine.run_full_sync().await {
+                            Ok(outcome) => {
+                                if outcome.modified_remote {
+                                    for i in 0..cfg.sync.len() {
+                                        suppressed_remote.insert(i);
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!(error = %e, "periodic sync failed");
+                            }
                         }
-                        pending_roots.clear();
+                        pending_local.clear();
+                        pending_remote.clear();
                     }
 
-                    // Short delay to batch incremental changes
+                    // Short delay to batch incremental changes, then process per-file
                     _ = tokio::time::sleep(std::time::Duration::from_millis(500)),
-                        if !pending_roots.is_empty() => {
-                        let roots_to_sync: Vec<usize> = pending_roots.drain().collect();
-                        for root_index in roots_to_sync {
-                            tracing::info!(root_index, "incremental sync triggered");
-                            if let Err(e) = engine.sync_one_root(root_index as i64).await {
-                                tracing::error!(
-                                    root_index,
-                                    error = %e,
-                                    "incremental sync failed"
-                                );
+                        if has_pending => {
+                        let local_items: Vec<(usize, String)> = pending_local.drain().collect();
+                        let remote_map = std::mem::take(&mut pending_remote);
+
+                        for (root_index, relative_path) in local_items {
+                            tracing::info!(
+                                root_index,
+                                path = %relative_path,
+                                "targeted local sync"
+                            );
+                            match engine
+                                .sync_local_change(root_index as i64, &relative_path)
+                                .await
+                            {
+                                Ok(outcome) => {
+                                    if outcome.modified_remote {
+                                        suppressed_remote.insert(root_index);
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::error!(
+                                        path = %relative_path,
+                                        error = %e,
+                                        "targeted local sync failed"
+                                    );
+                                }
+                            }
+                        }
+
+                        for ((root_index, _box_id), event) in &remote_map {
+                            match engine
+                                .sync_remote_change(*root_index as i64, event)
+                                .await
+                            {
+                                Ok(outcome) => {
+                                    if outcome.modified_remote {
+                                        suppressed_remote.insert(*root_index);
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::error!(
+                                        root_index,
+                                        event_type = %event.event_type,
+                                        error = %e,
+                                        "targeted remote sync failed"
+                                    );
+                                }
                             }
                         }
                     }
@@ -361,11 +497,12 @@ async fn print_status(pool: &sqlx::SqlitePool, cfg: &config::Config) -> Result<(
         } else {
             println!("  Last sync: never");
         }
+    }
 
-        // Show stream position if available
-        if let Ok(Some(pos)) = sync::state::get_stream_position(pool, root_index).await {
-            println!("  Stream position: {pos}");
-        }
+    // Show global stream position
+    if let Ok(Some(pos)) = sync::state::get_stream_position(pool, -1).await {
+        println!();
+        println!("Stream position: {pos}");
     }
 
     // Show errored entries

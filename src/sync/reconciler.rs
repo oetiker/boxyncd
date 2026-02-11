@@ -126,7 +126,7 @@ pub fn reconcile(
 }
 
 /// Reconcile a single path across local, remote, and DB.
-fn reconcile_entry(
+pub fn reconcile_entry(
     path: &str,
     local: Option<&LocalEntry>,
     remote: Option<&RemoteEntry>,
