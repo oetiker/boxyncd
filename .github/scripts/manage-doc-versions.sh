@@ -126,9 +126,16 @@ update_versions_json() {
     json_versions+="]"
 
     # Write the JSON
+    local latest_json
+    if [[ -n "$latest" ]]; then
+        latest_json="\"$latest\""
+    else
+        latest_json="null"
+    fi
+
     cat > "$VERSIONS_JSON" << EOF
 {
-  "latest": "${latest:-null}",
+  "latest": $latest_json,
   "versions": $json_versions
 }
 EOF
