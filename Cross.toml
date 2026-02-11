@@ -1,0 +1,2 @@
+[build.env]
+passthrough = ["BOX_CLIENT_ID", "BOX_CLIENT_SECRET"]

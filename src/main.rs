@@ -130,12 +130,21 @@ async fn main() -> Result<()> {
         };
     }
 
+    // Auth only needs auth config, not sync roots — works without a config file
+    // when built-in credentials are available (official release builds).
+    if let Command::Auth = cli.command {
+        let cfg = match config::load_config(cli.config.as_deref()) {
+            Ok(c) => c,
+            Err(_) if config::has_builtin_credentials() => config::auth_only_config(),
+            Err(e) => return Err(e),
+        };
+        return auth::run_auth_flow(&cfg).await;
+    }
+
     let cfg = config::load_config(cli.config.as_deref())?;
 
     match cli.command {
-        Command::Auth => {
-            auth::run_auth_flow(&cfg).await?;
-        }
+        Command::Auth => unreachable!("handled above"),
         Command::Start => {
             check_inotify_limits();
 

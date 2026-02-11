@@ -1,11 +1,6 @@
 # boxyncd configuration
-# Copy to ~/.config/boxyncd/config.toml and fill in your Box app credentials.
-#
-# To create a Box developer app:
-#   1. Go to https://app.box.com/developers/console
-#   2. Create a new Custom App with "User Authentication (OAuth 2.0)"
-#   3. Under "Configuration", add redirect URI: http://127.0.0.1:8080/callback
-#   4. Note the Client ID and Client Secret
+# Copy to ~/.config/boxyncd/config.toml and configure your sync roots.
+# Then run `boxyncd auth` to authenticate with Box.com.
 
 [general]
 # How often to run a full reconciliation pass (seconds)
@@ -17,9 +12,11 @@ log_level = "info"
 # Maximum concurrent uploads/downloads
 max_concurrent_transfers = 4
 
-[auth]
-client_id = "your_client_id_here"
-client_secret = "your_client_secret_here"
+# [auth]
+# Official release builds ship with built-in Box app credentials.
+# Only set these if you want to use your own Box developer app:
+# client_id = "your_client_id_here"
+# client_secret = "your_client_secret_here"
 # Port for the local OAuth callback server (default: 8080)
 # redirect_port = 8080
 # Custom token storage path (default: ~/.local/share/boxyncd/tokens.json)

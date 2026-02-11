@@ -8,7 +8,9 @@
 boxyncd auth
 ```
 
-Opens your browser for Box.com OAuth authentication. Tokens are stored locally at `~/.local/share/boxyncd/tokens.json`.
+Opens your browser for Box.com OAuth authentication. Release builds include
+built-in Box app credentials, so this works out of the box — no developer app
+setup required. Tokens are stored locally at `~/.local/share/boxyncd/tokens.json`.
 
 ### Start Sync Daemon
 

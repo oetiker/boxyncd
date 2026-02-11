@@ -1,15 +1,30 @@
 # Installation
 
-## Download
+## Quick Start
 
-Download the latest `boxyncd` binary from the
-[GitHub releases page](https://github.com/oetiker/boxyncd/releases)
-and place it somewhere in your `PATH`:
+1. Download the latest `boxyncd` binary from the
+   [GitHub releases page](https://github.com/oetiker/boxyncd/releases)
+   and place it somewhere in your `PATH`:
 
-```bash
-cp boxyncd ~/.local/bin/
-chmod +x ~/.local/bin/boxyncd
-```
+   ```bash
+   cp boxyncd ~/.local/bin/
+   chmod +x ~/.local/bin/boxyncd
+   ```
+
+2. Authenticate with Box.com:
+
+   ```bash
+   boxyncd auth
+   ```
+
+3. Configure your sync roots in `~/.config/boxyncd/config.toml`
+   (boxyncd will offer to create the file if it doesn't exist).
+
+4. Start syncing:
+
+   ```bash
+   boxyncd start
+   ```
 
 ## Systemd Service
 

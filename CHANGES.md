@@ -4,7 +4,16 @@
 
 ### New
 
+- Embed Box app credentials at compile time via `BOX_CLIENT_ID`/`BOX_CLIENT_SECRET` env vars
+- `boxyncd auth` works without a config file when built-in credentials are available
+- Auto-create config file from built-in template when missing (interactive prompt)
+- Add `Cross.toml` to pass credentials through to cross-compilation containers
+
 ### Changed
+
+- `[auth]` section in config is now optional — release builds use built-in credentials
+- Simplified onboarding: download binary, run `boxyncd auth`, configure sync roots
+- Example config no longer includes `client_id`/`client_secret` fields
 
 ### Fixed
 
