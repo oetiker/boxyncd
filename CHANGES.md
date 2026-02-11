@@ -4,11 +4,18 @@
 
 ### New
 
+### Changed
+
+### Fixed
+
+## 0.2.0 - 2026-02-11
+
+### New
+
 - Add `boxyncd service install/uninstall/status/log` subcommands for systemd user service management
 - Auto-detect and set D-Bus environment variables so `systemctl --user` works in SSH sessions
 - Warn when lingering is not enabled (needed for start-at-boot and surviving logout)
 - Generate systemd unit file dynamically using the current binary path
-
 ### Changed
 
 - Installation docs now point to GitHub Releases instead of compile-from-source instructions
