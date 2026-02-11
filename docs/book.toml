@@ -1,0 +1,24 @@
+[book]
+title = "boxyncd"
+description = "Bidirectional Box.com file sync daemon for Linux"
+authors = ["Tobias Oetiker"]
+language = "en"
+src = "src"
+
+[build]
+build-dir = "book"
+
+[output.html]
+additional-js = ["theme/version-selector.js"]
+additional-css = ["theme/version-selector.css"]
+default-theme = "light"
+preferred-dark-theme = "navy"
+git-repository-url = "https://github.com/oetiker/boxyncd"
+edit-url-template = "https://github.com/oetiker/boxyncd/edit/main/docs/{path}"
+site-url = "/boxyncd/"
+
+[output.html.playground]
+editable = false
+
+[output.html.fold]
+enable = true

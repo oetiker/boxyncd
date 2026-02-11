@@ -1,0 +1,31 @@
+[package]
+name = "boxyncd"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Bidirectional Box.com file sync daemon for Linux"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", features = ["json", "multipart", "stream"] }
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "migrate"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+chrono = { version = "0.4", features = ["serde"] }
+thiserror = "2"
+anyhow = "1"
+dirs = "6"
+url = "2"
+rand = "0.9"
+open = "5"
+sha1 = "0.10"
+notify = "7"
+notify-debouncer-mini = "0.5"
+tokio-util = "0.7"
+
+[dev-dependencies]
+tempfile = "3"

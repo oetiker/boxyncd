@@ -1,0 +1,37 @@
+# boxyncd — Bidirectional Box.com file sync daemon
+#
+# Install as a user service:
+#   mkdir -p ~/.config/systemd/user
+#   cp boxyncd.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable boxyncd
+#   systemctl --user start boxyncd
+#
+# View logs:
+#   journalctl --user -u boxyncd -f
+#
+# Prerequisites:
+#   1. Install boxyncd binary to a location in $PATH (e.g., ~/.local/bin/boxyncd)
+#   2. Create config: ~/.config/boxyncd/config.toml
+#   3. Authenticate: boxyncd auth
+
+[Unit]
+Description=Bidirectional Box.com file sync daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/boxyncd start
+Restart=on-failure
+RestartSec=10
+
+# Graceful shutdown via SIGTERM
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+# Environment
+Environment=RUST_LOG=boxyncd=info
+
+[Install]
+WantedBy=default.target

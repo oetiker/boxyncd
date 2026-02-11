@@ -1,0 +1,183 @@
+name: Documentation
+
+on:
+  push:
+    branches: [main]
+    tags:
+      - 'v[0-9]*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+env:
+  PAGES_URL: "https://oetiker.github.io/boxyncd"
+
+jobs:
+  build:
+    name: Build Documentation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install mdBook
+        run: |
+          mkdir -p ~/bin
+          curl -sSL https://github.com/rust-lang/mdBook/releases/download/v0.5.2/mdbook-v0.5.2-x86_64-unknown-linux-gnu.tar.gz | tar -xz -C ~/bin
+          echo "$HOME/bin" >> $GITHUB_PATH
+
+      - name: Build documentation
+        working-directory: docs
+        run: mdbook build
+
+      - name: Upload docs artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: docs
+          path: docs/book
+          retention-days: 1
+
+  deploy-dev:
+    name: Deploy Dev Documentation
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/scripts
+
+      - name: Download docs artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: docs
+          path: new-docs
+
+      - name: Mirror existing GitHub Pages
+        run: |
+          mkdir -p site
+          wget --mirror --no-parent --no-host-directories \
+               --directory-prefix=site \
+               --reject="index.html?*" \
+               --execute robots=off \
+               --quiet \
+               "$PAGES_URL/" 2>/dev/null || echo "No existing site to mirror (first deployment?)"
+
+          # Clean up wget artifacts
+          find site -name "*.tmp" -delete 2>/dev/null || true
+          find site -name "index.html\?*" -delete 2>/dev/null || true
+
+          echo "Existing site contents:"
+          ls -la site/boxyncd/ 2>/dev/null || echo "(empty or no boxyncd dir)"
+
+      - name: Update site with dev docs
+        run: |
+          rm -rf site/boxyncd/dev
+          mkdir -p site/boxyncd/dev
+          cp -r new-docs/* site/boxyncd/dev/
+
+      - name: Update versions and redirect
+        run: |
+          chmod +x .github/scripts/manage-doc-versions.sh
+          .github/scripts/manage-doc-versions.sh site/boxyncd cull
+          .github/scripts/manage-doc-versions.sh site/boxyncd update-json
+          .github/scripts/manage-doc-versions.sh site/boxyncd generate-redirect
+
+      - name: Show final site structure
+        run: |
+          echo "Final site structure:"
+          ls -la site/boxyncd/
+          echo ""
+          echo "versions.json:"
+          cat site/boxyncd/versions.json
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v4
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site/boxyncd
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+  deploy-release:
+    name: Deploy Release Documentation
+    runs-on: ubuntu-latest
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/scripts
+
+      - name: Download docs artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: docs
+          path: new-docs
+
+      - name: Mirror existing GitHub Pages
+        run: |
+          mkdir -p site
+          wget --mirror --no-parent --no-host-directories \
+               --directory-prefix=site \
+               --reject="index.html?*" \
+               --execute robots=off \
+               --quiet \
+               "$PAGES_URL/" 2>/dev/null || echo "No existing site to mirror"
+
+          # Clean up wget artifacts
+          find site -name "*.tmp" -delete 2>/dev/null || true
+          find site -name "index.html\?*" -delete 2>/dev/null || true
+
+          echo "Existing site contents:"
+          ls -la site/boxyncd/ 2>/dev/null || echo "(empty or no boxyncd dir)"
+
+      - name: Add new version to site
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/}"
+          mkdir -p "site/boxyncd/$VERSION"
+          cp -r new-docs/* "site/boxyncd/$VERSION/"
+          echo "Added version $VERSION"
+
+      - name: Update versions and redirect
+        run: |
+          chmod +x .github/scripts/manage-doc-versions.sh
+          .github/scripts/manage-doc-versions.sh site/boxyncd cull
+          .github/scripts/manage-doc-versions.sh site/boxyncd update-json
+          .github/scripts/manage-doc-versions.sh site/boxyncd generate-redirect
+
+      - name: Show final site structure
+        run: |
+          echo "Final site structure:"
+          ls -la site/boxyncd/
+          echo ""
+          echo "versions.json:"
+          cat site/boxyncd/versions.json
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v4
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site/boxyncd
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

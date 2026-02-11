@@ -1,0 +1,40 @@
+# boxyncd configuration
+# Copy to ~/.config/boxyncd/config.toml and fill in your Box app credentials.
+#
+# To create a Box developer app:
+#   1. Go to https://app.box.com/developers/console
+#   2. Create a new Custom App with "User Authentication (OAuth 2.0)"
+#   3. Under "Configuration", add redirect URI: http://127.0.0.1:8080/callback
+#   4. Note the Client ID and Client Secret
+
+[general]
+# How often to run a full reconciliation pass (seconds)
+full_sync_interval_secs = 300
+# Debounce delay for local filesystem events (milliseconds)
+local_debounce_ms = 2000
+# Log level: trace, debug, info, warn, error
+log_level = "info"
+# Maximum concurrent uploads/downloads
+max_concurrent_transfers = 4
+
+[auth]
+client_id = "your_client_id_here"
+client_secret = "your_client_secret_here"
+# Port for the local OAuth callback server (default: 8080)
+# redirect_port = 8080
+# Custom token storage path (default: ~/.local/share/boxyncd/tokens.json)
+# token_path = "/custom/path/tokens.json"
+
+# Each [[sync]] block maps a local folder to a Box folder.
+# box_folder_id "0" is the root of the user's Box account.
+
+[[sync]]
+local_path = "/home/user/BoxSync"
+box_folder_id = "0"
+exclude = ["*.tmp", ".git/**", "node_modules/**"]
+
+# You can add multiple sync roots:
+# [[sync]]
+# local_path = "/home/user/SharedDocs"
+# box_folder_id = "123456789"
+# exclude = ["target/**"]
