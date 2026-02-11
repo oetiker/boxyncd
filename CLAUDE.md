@@ -16,6 +16,12 @@ make release            # release build (runs fmt + clippy first)
 
 Always run `cargo clippy -- -D warnings` and `cargo test` before committing.
 
+## Changelog
+
+Update `CHANGES.md` under the `## Unreleased` section when making user-visible changes.
+Use the appropriate subsection: `### New` for features, `### Changed` for modifications, `### Fixed` for bug fixes.
+The release workflow automatically moves unreleased entries into a versioned section.
+
 ## Git workflow
 
 The release workflow (`gh workflow_dispatch`) bumps versions and pushes tags automatically.
