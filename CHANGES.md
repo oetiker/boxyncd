@@ -8,6 +8,8 @@
 
 ### Fixed
 
+- Documentation version selector now defaults to the latest stable release instead of the dev version
+
 ## 0.3.0 - 2026-02-11
 
 ### New

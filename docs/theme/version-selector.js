@@ -10,7 +10,7 @@
     }
 
     // Create version selector dropdown
-    function createVersionSelector(versions, currentVersion) {
+    function createVersionSelector(versions, currentVersion, latest) {
         const container = document.createElement('div');
         container.className = 'version-selector';
 
@@ -21,7 +21,13 @@
         versions.forEach(v => {
             const option = document.createElement('option');
             option.value = v.path;
-            option.textContent = v.version + (v.prerelease ? ' (dev)' : '');
+            let label = v.version;
+            if (v.version === latest) {
+                label += ' (latest)';
+            } else if (v.prerelease) {
+                label += ' (dev)';
+            }
+            option.textContent = label;
             if (v.version === currentVersion) {
                 option.selected = true;
             }
@@ -73,7 +79,7 @@
                 if (menuBar) {
                     const rightButtons = menuBar.querySelector('.right-buttons');
                     if (rightButtons) {
-                        const selector = createVersionSelector(data.versions, currentVersion);
+                        const selector = createVersionSelector(data.versions, currentVersion, data.latest);
                         rightButtons.insertBefore(selector, rightButtons.firstChild);
                     }
                 }

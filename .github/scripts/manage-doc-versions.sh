@@ -104,18 +104,30 @@ update_versions_json() {
         latest=$(echo "$versions" | head -1)
     fi
 
-    # Build versions array
+    # Build versions array: latest stable first, then dev, then older stable
     local first=true
     json_versions="["
 
-    # Add dev first if it exists
+    # Add latest stable version first
+    if [[ -n "$latest" ]]; then
+        json_versions+="{\"version\":\"$latest\",\"path\":\"/boxyncd/$latest/\"}"
+        first=false
+    fi
+
+    # Add dev if it exists
     if [[ -d "$SITE_DIR/dev" ]]; then
+        if [[ "$first" == "false" ]]; then
+            json_versions+=","
+        fi
         json_versions+="{\"version\":\"dev\",\"path\":\"/boxyncd/dev/\",\"prerelease\":true}"
         first=false
     fi
 
-    # Add stable versions (newest first)
+    # Add remaining stable versions (newest first, skip latest already added)
     for v in $versions; do
+        if [[ "$v" == "$latest" ]]; then
+            continue
+        fi
         if [[ "$first" == "false" ]]; then
             json_versions+=","
         fi
