@@ -4,8 +4,15 @@
 
 ### New
 
-- Show build date in `--version` output
+### Changed
 
+### Fixed
+
+## 0.3.0 - 2026-02-11
+
+### New
+
+- Show build date in `--version` output
 ### Changed
 
 - Incremental sync now operates on individual files instead of walking entire trees, reducing inotify noise and API calls
