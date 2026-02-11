@@ -39,7 +39,7 @@ boxyncd service log
 
 ### Lingering
 
-If you want boxyncd to keep running after you log out, enable lingering:
+For boxyncd to start at boot and keep running after you log out, enable lingering:
 
 ```bash
 sudo loginctl enable-linger $USER

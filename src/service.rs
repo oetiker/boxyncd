@@ -85,8 +85,9 @@ fn check_linger() {
     if !Path::new(&linger_path).exists() {
         eprintln!();
         eprintln!("Warning: Lingering is not enabled for your user account.");
-        eprintln!("Without lingering, the service will stop when you log out.");
-        eprintln!("Enable it with: sudo loginctl enable-linger {username}");
+        eprintln!("Without lingering, the service will not start at boot and will");
+        eprintln!("stop when you log out. Enable it with:");
+        eprintln!("  sudo loginctl enable-linger {username}");
     }
 }
 
