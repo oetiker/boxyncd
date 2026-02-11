@@ -75,8 +75,18 @@ By comparing all three, boxyncd determines the correct action for each file:
 | New | Missing | Missing | Upload |
 | Missing | New | Missing | Download |
 | Deleted | Unchanged | Known | Delete remote |
+| Deleted | Changed | Known | Download (remote wins) |
 | Unchanged | Deleted | Known | Delete local |
+| Changed | Deleted | Known | Upload (local wins) |
+| Deleted | Deleted | Known | Remove from DB |
 
 ### Conflict Resolution
 
-When both sides change a file differently, boxyncd creates a conflict copy with a timestamped name (e.g., `report (conflict 2025-02-11).pdf`) and downloads the remote version.
+When both sides change a file differently, boxyncd keeps your local version under the original filename and downloads the remote version as a timestamped conflict copy, e.g.:
+
+- `report.pdf` → `report (Conflicted Copy 2026-02-11 10-30-45).pdf`
+- `Makefile` → `Makefile (Conflicted Copy 2026-02-11 10-30-45)`
+
+If both sides happen to change to the same content (identical SHA-1), no conflict is raised.
+
+You can resolve conflicts by comparing the two files and deleting the one you don't need. On the next sync cycle the remaining file will be uploaded to Box.
