@@ -149,7 +149,7 @@ generate_redirect() {
     init_versions_json
 
     local latest
-    latest=$(cat "$VERSIONS_JSON" | grep -o '"latest": *"[^"]*"' | cut -d'"' -f4)
+    latest=$(grep -o '"latest": *"[^"]*"' "$VERSIONS_JSON" | cut -d'"' -f4 || true)
 
     if [[ -z "$latest" || "$latest" == "null" ]]; then
         # No stable version yet, redirect to dev
