@@ -50,6 +50,8 @@ pub struct GeneralConfig {
     pub log_level: String,
     #[serde(default = "default_max_concurrent")]
     pub max_concurrent_transfers: usize,
+    /// Custom path for the SQLite database file
+    pub db_path: Option<PathBuf>,
 }
 
 impl Default for GeneralConfig {
@@ -59,6 +61,7 @@ impl Default for GeneralConfig {
             local_debounce_ms: default_debounce_ms(),
             log_level: default_log_level(),
             max_concurrent_transfers: default_max_concurrent(),
+            db_path: None,
         }
     }
 }

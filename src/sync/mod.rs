@@ -54,6 +54,42 @@ impl SyncEngine {
         }
     }
 
+    /// Dry-run: walk trees, reconcile, and return actions per root without executing.
+    pub async fn dry_run(&self) -> Vec<(usize, Result<Vec<SyncAction>>)> {
+        let mut results = Vec::new();
+        for (index, root) in self.config.sync.iter().enumerate() {
+            let root_index = index as i64;
+            let base_path = &root.local_path;
+
+            let result = async {
+                // 1. Walk the remote tree
+                let remote_tree = self
+                    .walk_remote_tree(&root.box_folder_id, "", &root.exclude)
+                    .await?;
+
+                // 2. Load DB baseline
+                let db_entries = state::get_all_for_root(&self.pool, root_index).await?;
+                let db_by_path: std::collections::HashMap<&str, &SyncEntry> = db_entries
+                    .iter()
+                    .map(|e| (e.relative_path.as_str(), e))
+                    .collect();
+
+                // 3. Walk the local tree
+                let local_tree = self
+                    .walk_local_tree(base_path, &root.exclude, &db_by_path)
+                    .await?;
+
+                // 4. Reconcile (no execution)
+                let actions = reconciler::reconcile(&local_tree, &remote_tree, &db_entries);
+                Ok(actions)
+            }
+            .await;
+
+            results.push((index, result));
+        }
+        results
+    }
+
     /// Run a full sync cycle across all configured sync roots.
     pub async fn run_full_sync(&self) -> Result<SyncOutcome> {
         let mut outcome = SyncOutcome::default();

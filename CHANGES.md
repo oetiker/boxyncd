@@ -4,6 +4,9 @@
 
 ### New
 
+- Add `boxyncd dry-run` subcommand: validates config, auth, Box connectivity, folder access, and previews sync actions without making changes
+- Add `db_path` option to `[general]` config section for custom database file location
+
 ### Changed
 
 ### Fixed

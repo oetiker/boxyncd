@@ -73,6 +73,20 @@ impl BoxClient {
             .context("Failed to parse create folder response")
     }
 
+    /// GET /folders/{id}?fields=id,name — returns folder metadata.
+    pub async fn get_folder_info(&self, folder_id: &str) -> Result<BoxFolder> {
+        let resp = self
+            .api_request(Method::GET, &format!("/folders/{folder_id}"))
+            .query(&[("fields", "id,name,type")])
+            .send()
+            .await
+            .with_context(|| format!("Failed to get folder info for {folder_id}"))?;
+
+        resp.json()
+            .await
+            .with_context(|| format!("Failed to parse folder info for {folder_id}"))
+    }
+
     /// Delete a folder. Set `recursive` to true to delete non-empty folders.
     pub async fn delete_folder(
         &self,

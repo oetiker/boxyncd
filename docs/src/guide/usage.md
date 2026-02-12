@@ -47,6 +47,23 @@ boxyncd sync-now
 
 Runs a single full sync cycle and exits.
 
+### Dry Run
+
+```bash
+boxyncd dry-run
+```
+
+Validates your setup without making any changes:
+
+- Parses and validates the config file
+- Checks that each sync root's local directory exists and is writable
+- Verifies the auth token can be loaded
+- Tests Box API connectivity (calls `/users/me`)
+- Checks access to each configured Box folder
+- Previews what sync actions would be taken (walks both trees and runs the reconciler read-only)
+
+Exits with code 0 if everything passes and there is nothing to sync (or only shows pending actions), or code 1 if any check fails.
+
 ### Manage Systemd Service
 
 ```bash

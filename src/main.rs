@@ -42,6 +42,8 @@ enum Command {
     Status,
     /// Trigger an immediate full sync cycle
     SyncNow,
+    /// Validate config, auth, and connectivity; preview sync actions without making changes
+    DryRun,
     /// Manage the systemd user service
     Service {
         #[command(subcommand)]
@@ -193,12 +195,14 @@ async fn main() -> Result<()> {
 
     let cfg = config::load_config(cli.config.as_deref())?;
 
+    let db_path = cfg.general.db_path.as_deref();
+
     match cli.command {
         Command::Auth => unreachable!("handled above"),
         Command::Start => {
             check_inotify_limits();
 
-            let pool = db::init_db().await?;
+            let pool = db::init_db(db_path).await?;
             cleanup_stale_operations(&pool).await?;
 
             let token_mgr = Arc::new(auth::TokenManager::new(&cfg)?);
@@ -396,12 +400,12 @@ async fn main() -> Result<()> {
             tracing::info!("boxyncd stopped");
         }
         Command::Status => {
-            let pool = db::init_db().await?;
+            let pool = db::init_db(db_path).await?;
             print_status(&pool, &cfg).await?;
             pool.close().await;
         }
         Command::SyncNow => {
-            let pool = db::init_db().await?;
+            let pool = db::init_db(db_path).await?;
             cleanup_stale_operations(&pool).await?;
 
             let token_mgr = Arc::new(auth::TokenManager::new(&cfg)?);
@@ -413,6 +417,10 @@ async fn main() -> Result<()> {
 
             pool.close().await;
             println!("sync complete");
+        }
+        Command::DryRun => {
+            let exit_code = run_dry_run(&cfg).await;
+            std::process::exit(exit_code);
         }
         Command::Service { .. } => unreachable!("handled above"),
     }
@@ -530,4 +538,190 @@ async fn print_status(pool: &sqlx::SqlitePool, cfg: &config::Config) -> Result<(
     }
 
     Ok(())
+}
+
+/// Run dry-run checks and print checklist-style output.
+/// Returns process exit code: 0 on success, 1 on any error.
+async fn run_dry_run(cfg: &config::Config) -> i32 {
+    let mut errors = 0u32;
+
+    println!("boxyncd dry-run");
+    println!("===============");
+    println!("Config:          ok");
+
+    // --- Auth token ---
+    let token_mgr = match auth::TokenManager::new(cfg) {
+        Ok(tm) => {
+            println!("Auth token:      ok (token loaded)");
+            Some(Arc::new(tm))
+        }
+        Err(e) => {
+            println!("Auth token:      FAIL ({e:#})");
+            errors += 1;
+            None
+        }
+    };
+
+    // --- Box API connectivity ---
+    let client = token_mgr.map(|tm| Arc::new(box_api::BoxClient::new(tm)));
+    let user_name = if let Some(ref c) = client {
+        match c.get_current_user().await {
+            Ok(name) => {
+                println!("Box connection:  ok (logged in as \"{name}\")");
+                Some(name)
+            }
+            Err(e) => {
+                println!("Box connection:  FAIL ({e:#})");
+                errors += 1;
+                None
+            }
+        }
+    } else {
+        println!("Box connection:  skipped (no auth token)");
+        None
+    };
+    let _ = user_name; // used only for display above
+
+    // --- Open DB read-only (if it exists) ---
+    let ro_pool = match db::open_db_readonly(cfg.general.db_path.as_deref()).await {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(error = %e, "could not open DB read-only, proceeding without baseline");
+            None
+        }
+    };
+
+    // For SyncEngine we need a pool. If no DB exists, create an in-memory one.
+    let pool_for_engine = if let Some(ref p) = ro_pool {
+        p.clone()
+    } else {
+        sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("failed to create in-memory SQLite pool")
+    };
+
+    // --- Per-root checks ---
+    for (i, root) in cfg.sync.iter().enumerate() {
+        println!();
+        println!(
+            "Root #{}: {} -> box:{}",
+            i,
+            root.local_path.display(),
+            root.box_folder_id
+        );
+
+        // Local path check
+        let local_ok = if root.local_path.is_dir() {
+            // Probe writability by creating and removing a temp file
+            let probe = root.local_path.join(".boxyncd-dry-run-probe");
+            match std::fs::File::create(&probe) {
+                Ok(_) => {
+                    let _ = std::fs::remove_file(&probe);
+                    println!("  Local path:    ok (exists, writable)");
+                    true
+                }
+                Err(_) => {
+                    println!("  Local path:    FAIL (directory exists but is not writable)");
+                    errors += 1;
+                    false
+                }
+            }
+        } else if root.local_path.exists() {
+            println!("  Local path:    FAIL (exists but is not a directory)");
+            errors += 1;
+            false
+        } else {
+            println!("  Local path:    FAIL (directory does not exist)");
+            errors += 1;
+            false
+        };
+
+        // Box folder check
+        let folder_ok = if let Some(ref c) = client {
+            match c.get_folder_info(&root.box_folder_id).await {
+                Ok(folder) => {
+                    println!("  Box folder:    ok (name: \"{}\")", folder.name);
+                    true
+                }
+                Err(e) => {
+                    println!("  Box folder:    FAIL ({e:#})");
+                    errors += 1;
+                    false
+                }
+            }
+        } else {
+            println!("  Box folder:    skipped (no Box connection)");
+            false
+        };
+
+        // Sync preview
+        if local_ok && folder_ok {
+            let engine = sync::SyncEngine::new(
+                pool_for_engine.clone(),
+                client.clone().unwrap(),
+                cfg.clone(),
+            );
+            let results = engine.dry_run().await;
+
+            // Find our root's result
+            if let Some((_, ref result)) = results.into_iter().find(|(idx, _)| *idx == i) {
+                match result {
+                    Ok(actions) if actions.is_empty() => {
+                        println!("  Sync preview:  up to date");
+                    }
+                    Ok(actions) => {
+                        println!("  Sync preview:  {} action(s)", actions.len());
+                        for action in actions {
+                            let (verb, path) = describe_action(action);
+                            println!("    {verb:<12} {path}");
+                        }
+                    }
+                    Err(e) => {
+                        println!("  Sync preview:  FAIL ({e:#})");
+                        errors += 1;
+                    }
+                }
+            }
+        } else {
+            println!("  Sync preview:  skipped (prerequisites not met)");
+        }
+    }
+
+    // Close pools
+    if let Some(p) = ro_pool {
+        p.close().await;
+    }
+
+    // Summary
+    println!();
+    if errors == 0 {
+        println!("Result: ok");
+        0
+    } else {
+        println!(
+            "Result: FAIL ({} error{})",
+            errors,
+            if errors == 1 { "" } else { "s" }
+        );
+        1
+    }
+}
+
+/// Return a human-readable (verb, path) pair for a sync action.
+fn describe_action(action: &sync::reconciler::SyncAction) -> (&'static str, &str) {
+    use sync::reconciler::SyncAction;
+    match action {
+        SyncAction::Upload { relative_path, .. } => ("upload", relative_path),
+        SyncAction::UploadVersion { relative_path, .. } => ("upload", relative_path),
+        SyncAction::Download { relative_path, .. } => ("download", relative_path),
+        SyncAction::DeleteLocal { relative_path } => ("del-local", relative_path),
+        SyncAction::DeleteRemote { box_id, .. } => ("del-remote", box_id),
+        SyncAction::CreateLocalDir { relative_path } => ("mkdir", relative_path),
+        SyncAction::CreateRemoteDir { relative_path, .. } => ("mkdir-remote", relative_path),
+        SyncAction::Conflict { relative_path, .. } => ("conflict", relative_path),
+        SyncAction::RemoveDbEntry { .. } => ("cleanup", "(db entry)"),
+        SyncAction::RecordSynced { relative_path } => ("record", relative_path),
+    }
 }

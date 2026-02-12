@@ -124,6 +124,29 @@ impl<'a> AuthenticatedRequest<'a> {
     }
 }
 
+impl BoxClient {
+    /// GET /users/me — returns the authenticated user's display name.
+    pub async fn get_current_user(&self) -> Result<String> {
+        let resp = self
+            .api_request(Method::GET, "/users/me")
+            .query(&[("fields", "name")])
+            .send()
+            .await
+            .context("Failed to fetch current user")?;
+
+        #[derive(serde::Deserialize)]
+        struct UserMe {
+            name: String,
+        }
+
+        let user: UserMe = resp
+            .json()
+            .await
+            .context("Failed to parse /users/me response")?;
+        Ok(user.name)
+    }
+}
+
 fn jitter() -> Duration {
     let ms: u64 = rand::random::<u64>() % 1000;
     Duration::from_millis(ms)

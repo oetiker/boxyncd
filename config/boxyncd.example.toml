@@ -13,6 +13,8 @@ local_debounce_ms = 2000
 log_level = "info"
 # Maximum concurrent uploads/downloads
 max_concurrent_transfers = 4
+# Custom path for the SQLite database file (default: ~/.local/share/boxyncd/sync.db)
+# db_path = "/custom/path/sync.db"
 
 # [auth]
 # Official release builds ship with built-in Box app credentials.
