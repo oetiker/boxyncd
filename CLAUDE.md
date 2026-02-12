@@ -53,3 +53,27 @@ This means the remote may have commits you don't have locally.
 - `ci.yml` — fmt, clippy, test on push/PR to main
 - `docs.yml` — builds mdBook, deploys versioned docs (dev on push to main, versioned on tag push)
 - `release.yml` — binary-only releases (workflow_dispatch), no doc deployment
+
+## Release process
+
+Releases are fully automated via `release.yml` (workflow_dispatch). To trigger:
+
+```bash
+gh workflow run release.yml -f release_type=bugfix    # 0.3.1 -> 0.3.2
+gh workflow run release.yml -f release_type=feature   # 0.3.1 -> 0.4.0
+gh workflow run release.yml -f release_type=major     # 0.3.1 -> 1.0.0
+```
+
+The workflow will:
+
+1. Verify it's running on `main`
+2. Calculate the new version from the latest git tag
+3. Update `Cargo.toml` version
+4. Move `## Unreleased` entries in `CHANGES.md` into a new versioned section
+5. Commit, tag (`vX.Y.Z`), and push to `main`
+6. Build static binaries via `cross` (x86_64-linux-musl, aarch64-linux-musl, x86_64-illumos)
+7. Create a GitHub Release with the changelog excerpt and binary archives
+
+The tag push also triggers `docs.yml` to deploy versioned documentation.
+
+**Important:** After a release, `git pull --rebase` before further work — the CI pushes a version-bump commit.
