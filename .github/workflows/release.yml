@@ -111,6 +111,10 @@ jobs:
             os: ubuntu-latest
             archive: tar.gz
             cross: true
+          - target: x86_64-unknown-illumos
+            os: ubuntu-latest
+            archive: tar.gz
+            cross: true
     steps:
       - uses: actions/checkout@v4
         with:

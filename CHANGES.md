@@ -4,6 +4,8 @@
 
 ### New
 
+- Added illumos amd64 (`x86_64-unknown-illumos`) binary to release builds
+
 ### Changed
 
 ### Fixed
