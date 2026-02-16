@@ -8,6 +8,10 @@
 
 ### Fixed
 
+- Fix targeted sync using file API endpoint for folders, causing cascading deletions when a directory's ctime changed
+- Fix transient SHA1 failures (locked files, I/O errors) being treated as file-not-found, which could trigger remote deletion
+- Fix targeted sync processing items in arbitrary order, causing child uploads to fail when parent directory not yet created
+
 ## 0.4.2 - 2026-02-16
 
 ### Fixed

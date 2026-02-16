@@ -343,7 +343,14 @@ async fn main() -> Result<()> {
                     // Short delay to batch incremental changes, then process per-file
                     _ = tokio::time::sleep(std::time::Duration::from_millis(500)),
                         if has_pending => {
-                        let local_items: Vec<(usize, String)> = pending_local.drain().collect();
+                        let mut local_items: Vec<(usize, String)> = pending_local.drain().collect();
+                        // Sort by path depth so parent directories are processed
+                        // before their children (avoids "parent not found" errors).
+                        local_items.sort_by(|a, b| {
+                            let a_depth = a.1.matches('/').count();
+                            let b_depth = b.1.matches('/').count();
+                            a_depth.cmp(&b_depth).then(a.1.cmp(&b.1))
+                        });
                         let remote_map = std::mem::take(&mut pending_remote);
 
                         for (root_index, relative_path) in local_items {

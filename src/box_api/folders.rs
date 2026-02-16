@@ -77,7 +77,7 @@ impl BoxClient {
     pub async fn get_folder_info(&self, folder_id: &str) -> Result<BoxFolder> {
         let resp = self
             .api_request(Method::GET, &format!("/folders/{folder_id}"))
-            .query(&[("fields", "id,name,type")])
+            .query(&[("fields", "id,name,type,etag,parent,item_status")])
             .send()
             .await
             .with_context(|| format!("Failed to get folder info for {folder_id}"))?;

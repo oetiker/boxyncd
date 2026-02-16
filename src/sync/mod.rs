@@ -731,13 +731,18 @@ impl SyncEngine {
         let db_entry = state::get_by_path(&self.pool, root_index, relative_path).await?;
 
         // 2. Local state
-        let local = self.stat_local_entry(base_path, relative_path).await;
+        let local = self.stat_local_entry(base_path, relative_path).await?;
 
         // 3. Remote state
         let remote = if let Some(ref db) = db_entry
             && let Some(ref box_id) = db.box_id
         {
-            self.fetch_remote_entry(box_id, relative_path).await?
+            if db.entry_type == "folder" {
+                self.fetch_remote_folder_entry(box_id, relative_path)
+                    .await?
+            } else {
+                self.fetch_remote_entry(box_id, relative_path).await?
+            }
         } else {
             // New local file — check if it already exists on Box
             self.find_remote_entry(root_index, relative_path).await?
@@ -800,21 +805,29 @@ impl SyncEngine {
 
         tracing::info!(path = %relative_path, event_type = %event.event_type, "targeted remote sync");
 
-        // 2. Remote state
+        // 2. DB baseline (needed before remote lookup to pick the right API)
+        let db_entry = state::get_by_path(&self.pool, root_index, &relative_path).await?;
+
+        // 3. Remote state
         let remote = if event.event_type == "ITEM_TRASH" {
             // We know it's gone — skip the API call
             None
         } else if let Some(ref box_id) = event.box_id {
-            self.fetch_remote_entry(box_id, &relative_path).await?
+            let is_folder = db_entry
+                .as_ref()
+                .is_some_and(|db| db.entry_type == "folder");
+            if is_folder {
+                self.fetch_remote_folder_entry(box_id, &relative_path)
+                    .await?
+            } else {
+                self.fetch_remote_entry(box_id, &relative_path).await?
+            }
         } else {
             None
         };
 
-        // 3. Local state
-        let local = self.stat_local_entry(base_path, &relative_path).await;
-
-        // 4. DB baseline
-        let db_entry = state::get_by_path(&self.pool, root_index, &relative_path).await?;
+        // 4. Local state
+        let local = self.stat_local_entry(base_path, &relative_path).await?;
 
         // 5. Reconcile
         let action = reconciler::reconcile_entry(
@@ -843,22 +856,31 @@ impl SyncEngine {
     }
 
     /// Stat a single local file and build a `LocalEntry` (None if it doesn't exist).
-    async fn stat_local_entry(&self, base_path: &Path, relative_path: &str) -> Option<LocalEntry> {
+    /// Returns Err on transient failures (e.g. SHA1 I/O error on an existing file)
+    /// so the caller skips this sync attempt instead of treating it as a deletion.
+    async fn stat_local_entry(
+        &self,
+        base_path: &Path,
+        relative_path: &str,
+    ) -> Result<Option<LocalEntry>> {
         let full_path = base_path.join(relative_path);
-        let meta = tokio::fs::symlink_metadata(&full_path).await.ok()?;
+        let meta = match tokio::fs::symlink_metadata(&full_path).await {
+            Ok(m) => m,
+            Err(_) => return Ok(None), // truly doesn't exist
+        };
 
         if meta.is_symlink() {
-            return None;
+            return Ok(None);
         }
 
         if meta.is_dir() {
-            return Some(LocalEntry {
+            return Ok(Some(LocalEntry {
                 relative_path: relative_path.to_string(),
                 is_dir: true,
                 sha1: None,
                 size: 0,
                 modified_at: String::new(),
-            });
+            }));
         }
 
         if meta.is_file() {
@@ -874,23 +896,17 @@ impl SyncEngine {
                     .unwrap_or_default()
                     .to_rfc3339()
             };
-            let sha1 = match hash::compute_sha1(&full_path).await {
-                Ok(h) => Some(h),
-                Err(e) => {
-                    tracing::warn!(path = %relative_path, error = %e, "SHA-1 failed");
-                    return None;
-                }
-            };
-            return Some(LocalEntry {
+            let sha1 = Some(hash::compute_sha1(&full_path).await?);
+            return Ok(Some(LocalEntry {
                 relative_path: relative_path.to_string(),
                 is_dir: false,
                 sha1,
                 size,
                 modified_at: mtime,
-            });
+            }));
         }
 
-        None
+        Ok(None)
     }
 
     /// Fetch remote file metadata from Box and wrap as RemoteEntry.
@@ -914,6 +930,40 @@ impl SyncEngine {
                     etag: f.etag,
                     size: f.size,
                     modified_at: f.content_modified_at.or(f.modified_at),
+                }))
+            }
+            Err(e) => {
+                let msg = format!("{e:#}");
+                if msg.contains("404") || msg.contains("not_found") {
+                    Ok(None)
+                } else {
+                    Err(e)
+                }
+            }
+        }
+    }
+
+    /// Fetch remote folder metadata from Box and wrap as RemoteEntry.
+    /// Returns None on 404 / trashed items.
+    async fn fetch_remote_folder_entry(
+        &self,
+        box_id: &str,
+        relative_path: &str,
+    ) -> Result<Option<RemoteEntry>> {
+        match self.client.get_folder_info(box_id).await {
+            Ok(f) => {
+                if f.item_status.as_deref() == Some("trashed") {
+                    return Ok(None);
+                }
+                Ok(Some(RemoteEntry {
+                    relative_path: relative_path.to_string(),
+                    is_dir: true,
+                    box_id: f.id,
+                    parent_id: f.parent.map(|p| p.id).unwrap_or_default(),
+                    sha1: None,
+                    etag: f.etag,
+                    size: 0,
+                    modified_at: None,
                 }))
             }
             Err(e) => {
