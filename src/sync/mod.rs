@@ -160,68 +160,52 @@ impl SyncEngine {
             .await
     }
 
-    /// Recursively walk the remote Box folder tree, building a flat list of RemoteEntry.
-    fn walk_remote_tree<'a>(
-        &'a self,
-        folder_id: &'a str,
-        prefix: &'a str,
-        exclude: &'a [String],
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<RemoteEntry>>> + Send + 'a>>
-    {
-        Box::pin(async move {
-            let items = self.client.list_folder_items(folder_id).await?;
-            let mut entries = Vec::new();
+    /// Walk the remote Box folder tree concurrently, building a flat list of RemoteEntry.
+    ///
+    /// Uses a bounded `JoinSet` (up to 8 concurrent API calls) so that large
+    /// hierarchies are listed in parallel instead of sequentially.
+    async fn walk_remote_tree(
+        &self,
+        folder_id: &str,
+        prefix: &str,
+        exclude: &[String],
+    ) -> Result<Vec<RemoteEntry>> {
+        let api_sem = Arc::new(Semaphore::new(8));
+        let client = Arc::clone(&self.client);
+        let exclude: Arc<[String]> = exclude.to_vec().into();
+        let mut entries = Vec::new();
+        let mut join_set = tokio::task::JoinSet::new();
 
-            for item in &items {
-                let relative_path = if prefix.is_empty() {
-                    item.name.clone()
-                } else {
-                    format!("{prefix}/{}", item.name)
-                };
+        // Seed with the root folder
+        {
+            let sem = Arc::clone(&api_sem);
+            let cl = Arc::clone(&client);
+            let exc = Arc::clone(&exclude);
+            let fid = folder_id.to_string();
+            let pfx = prefix.to_string();
+            join_set.spawn(async move {
+                let _permit = sem.acquire().await.map_err(|e| anyhow::anyhow!("{e}"))?;
+                list_remote_folder(&cl, &fid, &pfx, &exc).await
+            });
+        }
 
-                // Check exclude patterns
-                if sync_path::matches_exclude(&relative_path, exclude) {
-                    tracing::debug!(path = %relative_path, "excluded (remote)");
-                    continue;
-                }
+        while let Some(result) = join_set.join_next().await {
+            let (folder_entries, subfolders) =
+                result.context("remote tree walk task panicked")??;
+            entries.extend(folder_entries);
 
-                if item.is_folder() {
-                    entries.push(RemoteEntry {
-                        relative_path: relative_path.clone(),
-                        is_dir: true,
-                        box_id: item.id.clone(),
-                        parent_id: folder_id.to_string(),
-                        sha1: None,
-                        etag: item.etag.clone(),
-                        size: 0,
-                        modified_at: item.modified_at.clone(),
-                    });
-
-                    // Recurse into subfolder
-                    let sub_entries = self
-                        .walk_remote_tree(&item.id, &relative_path, exclude)
-                        .await?;
-                    entries.extend(sub_entries);
-                } else if item.is_file() {
-                    entries.push(RemoteEntry {
-                        relative_path,
-                        is_dir: false,
-                        box_id: item.id.clone(),
-                        parent_id: folder_id.to_string(),
-                        sha1: item.sha1.clone(),
-                        etag: item.etag.clone(),
-                        size: item.size.unwrap_or(0),
-                        modified_at: item
-                            .content_modified_at
-                            .clone()
-                            .or(item.modified_at.clone()),
-                    });
-                }
-                // Skip web_links and other types
+            for (sub_id, sub_prefix) in subfolders {
+                let sem = Arc::clone(&api_sem);
+                let cl = Arc::clone(&client);
+                let exc = Arc::clone(&exclude);
+                join_set.spawn(async move {
+                    let _permit = sem.acquire().await.map_err(|e| anyhow::anyhow!("{e}"))?;
+                    list_remote_folder(&cl, &sub_id, &sub_prefix, &exc).await
+                });
             }
+        }
 
-            Ok(entries)
-        })
+        Ok(entries)
     }
 
     /// Recursively walk the local directory tree, building a flat list of LocalEntry.
@@ -1115,4 +1099,66 @@ fn action_path(action: &SyncAction) -> Option<&str> {
         | SyncAction::RecordSynced { relative_path } => Some(relative_path),
         SyncAction::DeleteRemote { .. } | SyncAction::RemoveDbEntry { .. } => None,
     }
+}
+
+/// List a single remote folder, returning its entries and subfolders to recurse into.
+async fn list_remote_folder(
+    client: &BoxClient,
+    folder_id: &str,
+    prefix: &str,
+    exclude: &[String],
+) -> Result<(Vec<RemoteEntry>, Vec<(String, String)>)> {
+    let items = client.list_folder_items(folder_id).await?;
+
+    let prefix_display = if prefix.is_empty() { "/" } else { prefix };
+    tracing::debug!(folder = %prefix_display, items = items.len(), "listed remote folder");
+
+    let mut entries = Vec::new();
+    let mut subfolders = Vec::new();
+
+    for item in &items {
+        let relative_path = if prefix.is_empty() {
+            item.name.clone()
+        } else {
+            format!("{prefix}/{}", item.name)
+        };
+
+        // Check exclude patterns
+        if sync_path::matches_exclude(&relative_path, exclude) {
+            tracing::debug!(path = %relative_path, "excluded (remote)");
+            continue;
+        }
+
+        if item.is_folder() {
+            entries.push(RemoteEntry {
+                relative_path: relative_path.clone(),
+                is_dir: true,
+                box_id: item.id.clone(),
+                parent_id: folder_id.to_string(),
+                sha1: None,
+                etag: item.etag.clone(),
+                size: 0,
+                modified_at: item.modified_at.clone(),
+            });
+
+            subfolders.push((item.id.clone(), relative_path));
+        } else if item.is_file() {
+            entries.push(RemoteEntry {
+                relative_path,
+                is_dir: false,
+                box_id: item.id.clone(),
+                parent_id: folder_id.to_string(),
+                sha1: item.sha1.clone(),
+                etag: item.etag.clone(),
+                size: item.size.unwrap_or(0),
+                modified_at: item
+                    .content_modified_at
+                    .clone()
+                    .or(item.modified_at.clone()),
+            });
+        }
+        // Skip web_links and other types
+    }
+
+    Ok((entries, subfolders))
 }

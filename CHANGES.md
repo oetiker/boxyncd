@@ -8,6 +8,8 @@
 
 ### Fixed
 
+- Fix apparent hang when syncing large folder hierarchies (add per-folder progress logging, parallelize remote tree walk)
+
 ## 0.4.0 - 2026-02-12
 
 ### New
