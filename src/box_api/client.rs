@@ -81,46 +81,69 @@ impl<'a> AuthenticatedRequest<'a> {
         self
     }
 
-    /// Send the request with automatic auth and retry.
+    /// Send the request with automatic auth and retry on rate-limit (429).
     pub async fn send(self) -> Result<Response> {
-        // We need to be able to rebuild the request on retry.
-        // For simple cases (no body), we can clone the builder.
-        // For requests with bodies, we send once and don't retry on 401.
-        let token = self.client.token_manager.get_access_token().await?;
-        let resp = self
-            .builder
-            .bearer_auth(&token)
-            .send()
-            .await
-            .context("HTTP request failed")?;
+        const MAX_RETRIES: u32 = 5;
+        let mut builder = self.builder;
 
-        match resp.status() {
-            s if s.is_success() || s == StatusCode::FOUND => Ok(resp),
+        for attempt in 0..=MAX_RETRIES {
+            let token = self.client.token_manager.get_access_token().await?;
+            // Clone before consuming — succeeds for non-streamed bodies.
+            let retry_builder = builder.try_clone();
 
-            StatusCode::TOO_MANY_REQUESTS => {
-                let retry_after = resp
-                    .headers()
-                    .get("retry-after")
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|v| v.parse::<u64>().ok())
-                    .unwrap_or(2);
-                let wait = Duration::from_secs(retry_after) + jitter();
-                tracing::warn!(retry_after, "rate limited, waiting {wait:?}");
-                tokio::time::sleep(wait).await;
-                anyhow::bail!("Rate limited — retry the operation");
-            }
+            let resp = builder
+                .bearer_auth(&token)
+                .send()
+                .await
+                .context("HTTP request failed")?;
 
-            StatusCode::CONFLICT | StatusCode::PRECONDITION_FAILED => Ok(resp),
+            match resp.status() {
+                s if s.is_success() || s == StatusCode::FOUND => return Ok(resp),
 
-            status => {
-                let body = resp.text().await.unwrap_or_default();
-                let api_err: Option<BoxApiError> = serde_json::from_str(&body).ok();
-                if let Some(err) = api_err {
-                    anyhow::bail!("{err}");
+                StatusCode::TOO_MANY_REQUESTS if attempt < MAX_RETRIES => {
+                    let retry_after = resp
+                        .headers()
+                        .get("retry-after")
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|v| v.parse::<u64>().ok())
+                        .unwrap_or(2);
+                    let wait = Duration::from_secs(retry_after) + jitter();
+                    tracing::warn!(
+                        retry_after,
+                        attempt = attempt + 1,
+                        "rate limited, waiting {wait:?}"
+                    );
+                    tokio::time::sleep(wait).await;
+
+                    match retry_builder {
+                        Some(b) => {
+                            builder = b;
+                            continue;
+                        }
+                        None => {
+                            anyhow::bail!("Rate limited — cannot retry request with streamed body")
+                        }
+                    }
                 }
-                anyhow::bail!("Box API error ({status}): {body}");
+
+                StatusCode::TOO_MANY_REQUESTS => {
+                    anyhow::bail!("Rate limited — exhausted {MAX_RETRIES} retries");
+                }
+
+                StatusCode::CONFLICT | StatusCode::PRECONDITION_FAILED => return Ok(resp),
+
+                status => {
+                    let body = resp.text().await.unwrap_or_default();
+                    let api_err: Option<BoxApiError> = serde_json::from_str(&body).ok();
+                    if let Some(err) = api_err {
+                        anyhow::bail!("{err}");
+                    }
+                    anyhow::bail!("Box API error ({status}): {body}");
+                }
             }
         }
+
+        unreachable!()
     }
 }
 

@@ -162,7 +162,7 @@ impl SyncEngine {
 
     /// Walk the remote Box folder tree concurrently, building a flat list of RemoteEntry.
     ///
-    /// Uses a bounded `JoinSet` (up to 8 concurrent API calls) so that large
+    /// Uses a bounded `JoinSet` (up to 4 concurrent API calls) so that large
     /// hierarchies are listed in parallel instead of sequentially.
     async fn walk_remote_tree(
         &self,
@@ -170,7 +170,7 @@ impl SyncEngine {
         prefix: &str,
         exclude: &[String],
     ) -> Result<Vec<RemoteEntry>> {
-        let api_sem = Arc::new(Semaphore::new(8));
+        let api_sem = Arc::new(Semaphore::new(4));
         let client = Arc::clone(&self.client);
         let exclude: Arc<[String]> = exclude.to_vec().into();
         let mut entries = Vec::new();
