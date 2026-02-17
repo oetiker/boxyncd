@@ -50,6 +50,8 @@ pub async fn upload_and_record(
         last_sync_at: None,
         last_error: None,
         retry_count: 0,
+        trashed_at: None,
+        trash_path: None,
     };
 
     state::upsert(pool, &entry).await?;
@@ -96,6 +98,8 @@ pub async fn upload_version_and_record(
         last_sync_at: None,
         last_error: None,
         retry_count: 0,
+        trashed_at: None,
+        trash_path: None,
     };
 
     state::upsert(pool, &entry).await?;

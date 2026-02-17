@@ -35,6 +35,14 @@ max_concurrent_transfers = 4
 local_path = "/home/user/BoxSync"
 box_folder_id = "0"
 exclude = ["*.tmp", ".git/**", "node_modules/**"]
+# Optional local trash bin for remote-initiated deletions.
+# When a file is removed on Box, boxyncd moves the local copy here instead of deleting it.
+# User-initiated local deletions are NOT affected — they propagate to Box normally.
+# This mirrors Box.com's own Trash Bin but on the local side.
+# Path can be absolute or relative to local_path. Auto-excluded from sync when inside the tree.
+# remote_trash_path = ".trash"
+# Days to keep trashed files before permanent deletion (default: 30)
+# remote_trash_days = 30
 
 # You can add multiple sync roots:
 # [[sync]]

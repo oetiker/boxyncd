@@ -132,6 +132,13 @@ async fn check_local_change(
     let root = &cfg.sync[change.root_index];
     let base_path = &root.local_path;
 
+    // Ignore changes inside the trash directory
+    if let Some(resolved) = root.resolved_remote_trash_path() {
+        if change.path.starts_with(&resolved) {
+            return None;
+        }
+    }
+
     let relative = match change.path.strip_prefix(base_path) {
         Ok(r) if r.as_os_str().is_empty() => return None, // sync root dir itself
         Ok(r) => r.to_string_lossy().into_owned(),
@@ -165,6 +172,22 @@ async fn check_local_change(
     };
 
     if is_echo { None } else { Some(relative) }
+}
+
+/// Run trash cleanup for all sync roots that have a local trash bin configured.
+async fn trash_cleanup(pool: &sqlx::SqlitePool, cfg: &config::Config) {
+    for (index, root) in cfg.sync.iter().enumerate() {
+        if let Some(resolved) = root.resolved_remote_trash_path() {
+            let days = root.remote_trash_retention_days();
+            if let Err(e) = sync::trash::cleanup_trash(pool, index as i64, &resolved, days).await {
+                tracing::error!(
+                    root = %root.local_path.display(),
+                    error = %e,
+                    "trash cleanup failed"
+                );
+            }
+        }
+    }
 }
 
 #[tokio::main]
@@ -217,6 +240,7 @@ async fn main() -> Result<()> {
             if let Err(e) = engine.run_full_sync().await {
                 tracing::error!(error = %e, "initial sync failed");
             }
+            trash_cleanup(&pool, &cfg).await;
 
             // Start local file watchers
             let roots: Vec<(usize, PathBuf)> = cfg
@@ -336,6 +360,7 @@ async fn main() -> Result<()> {
                                 tracing::error!(error = %e, "periodic sync failed");
                             }
                         }
+                        trash_cleanup(&pool, &cfg).await;
                         pending_local.clear();
                         pending_remote.clear();
                     }

@@ -75,6 +75,8 @@ pub async fn download_and_record(
         last_sync_at: None, // set by upsert
         last_error: None,
         retry_count: 0,
+        trashed_at: None,
+        trash_path: None,
     };
 
     state::upsert(pool, &entry).await?;

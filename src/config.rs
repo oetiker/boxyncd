@@ -108,6 +108,46 @@ pub struct SyncRoot {
     pub box_folder_id: String,
     #[serde(default)]
     pub exclude: Vec<String>,
+    /// Optional local trash directory for remote-initiated deletions.
+    /// When a file is removed on Box and the sync engine deletes it locally,
+    /// it is moved here instead of being permanently deleted.
+    /// User-initiated local deletions are not affected — they propagate to Box normally.
+    pub remote_trash_path: Option<PathBuf>,
+    /// Days to keep trashed files before permanent deletion (default: 30).
+    /// Only used when `remote_trash_path` is set.
+    pub remote_trash_days: Option<u64>,
+}
+
+impl SyncRoot {
+    /// Resolve remote_trash_path: relative paths are resolved against local_path.
+    pub fn resolved_remote_trash_path(&self) -> Option<PathBuf> {
+        self.remote_trash_path.as_ref().map(|tp| {
+            if tp.is_absolute() {
+                tp.clone()
+            } else {
+                self.local_path.join(tp)
+            }
+        })
+    }
+
+    /// Return the effective exclude patterns for local operations,
+    /// including the trash directory if it sits inside the sync tree.
+    pub fn local_excludes(&self) -> Vec<String> {
+        let mut excludes = self.exclude.clone();
+        if let Some(resolved) = self.resolved_remote_trash_path() {
+            if let Ok(rel) = resolved.strip_prefix(&self.local_path) {
+                let rel_str = rel.to_string_lossy();
+                excludes.push(rel_str.to_string());
+                excludes.push(format!("{rel_str}/**"));
+            }
+        }
+        excludes
+    }
+
+    /// Number of days to keep trashed files (default 30).
+    pub fn remote_trash_retention_days(&self) -> u64 {
+        self.remote_trash_days.unwrap_or(30)
+    }
 }
 
 pub fn default_config_path() -> Result<PathBuf> {

@@ -4,6 +4,7 @@ pub mod local_watcher;
 pub mod reconciler;
 pub mod remote_watcher;
 pub mod state;
+pub mod trash;
 mod uploader;
 
 use std::path::Path;
@@ -75,8 +76,9 @@ impl SyncEngine {
                     .collect();
 
                 // 3. Walk the local tree
+                let local_excludes = root.local_excludes();
                 let local_tree = self
-                    .walk_local_tree(base_path, &root.exclude, &db_by_path)
+                    .walk_local_tree(base_path, &local_excludes, &db_by_path)
                     .await?;
 
                 // 4. Reconcile (no execution)
@@ -142,8 +144,9 @@ impl SyncEngine {
 
         // 3. Walk the local tree (skips SHA1 for files unchanged since last sync)
         tracing::debug!("walking local tree");
+        let local_excludes = root.local_excludes();
         let local_tree = self
-            .walk_local_tree(base_path, &root.exclude, &db_by_path)
+            .walk_local_tree(base_path, &local_excludes, &db_by_path)
             .await?;
         tracing::debug!(count = local_tree.len(), "local entries found");
 
@@ -437,32 +440,61 @@ impl SyncEngine {
 
             SyncAction::DeleteLocal { relative_path } => {
                 let full_path = base_path.join(relative_path);
-                tracing::info!(path = %relative_path, "deleting locally");
+                let root = &self.config.sync[root_index as usize];
 
-                let meta = tokio::fs::metadata(&full_path).await;
-                match meta {
-                    Ok(m) if m.is_dir() => {
-                        tokio::fs::remove_dir_all(&full_path)
-                            .await
-                            .with_context(|| {
-                                format!("Failed to remove dir: {}", full_path.display())
+                if let Some(trash_base) = root.resolved_remote_trash_path() {
+                    // Move to trash instead of deleting
+                    let meta = tokio::fs::metadata(&full_path).await;
+                    match meta {
+                        Ok(_) => {
+                            tracing::info!(path = %relative_path, "moving to trash");
+                            let dest = trash::move_to_trash(&trash_base, relative_path, &full_path)
+                                .await?;
+                            if let Some(entry) =
+                                state::get_by_path(&self.pool, root_index, relative_path).await?
+                            {
+                                state::mark_trashed(&self.pool, entry.id, &dest.to_string_lossy())
+                                    .await?;
+                            }
+                        }
+                        Err(_) => {
+                            tracing::debug!(path = %relative_path, "already gone locally");
+                            if let Some(entry) =
+                                state::get_by_path(&self.pool, root_index, relative_path).await?
+                            {
+                                state::delete_entry(&self.pool, entry.id).await?;
+                            }
+                        }
+                    }
+                } else {
+                    // Direct deletion (no trash configured)
+                    tracing::info!(path = %relative_path, "deleting locally");
+
+                    let meta = tokio::fs::metadata(&full_path).await;
+                    match meta {
+                        Ok(m) if m.is_dir() => {
+                            tokio::fs::remove_dir_all(&full_path)
+                                .await
+                                .with_context(|| {
+                                    format!("Failed to remove dir: {}", full_path.display())
+                                })?;
+                        }
+                        Ok(_) => {
+                            tokio::fs::remove_file(&full_path).await.with_context(|| {
+                                format!("Failed to remove file: {}", full_path.display())
                             })?;
+                        }
+                        Err(_) => {
+                            tracing::debug!(path = %relative_path, "already gone locally");
+                        }
                     }
-                    Ok(_) => {
-                        tokio::fs::remove_file(&full_path).await.with_context(|| {
-                            format!("Failed to remove file: {}", full_path.display())
-                        })?;
-                    }
-                    Err(_) => {
-                        tracing::debug!(path = %relative_path, "already gone locally");
-                    }
-                }
 
-                // Remove from DB
-                if let Some(entry) =
-                    state::get_by_path(&self.pool, root_index, relative_path).await?
-                {
-                    state::delete_entry(&self.pool, entry.id).await?;
+                    // Remove from DB
+                    if let Some(entry) =
+                        state::get_by_path(&self.pool, root_index, relative_path).await?
+                    {
+                        state::delete_entry(&self.pool, entry.id).await?;
+                    }
                 }
             }
 
@@ -523,6 +555,8 @@ impl SyncEngine {
                         last_sync_at: None,
                         last_error: None,
                         retry_count: 0,
+                        trashed_at: None,
+                        trash_path: None,
                     };
                     state::upsert(&self.pool, &entry).await?;
                 }
@@ -563,6 +597,8 @@ impl SyncEngine {
                     local_size: None,
                     sync_status: "synced".into(),
                     last_sync_at: None,
+                    trashed_at: None,
+                    trash_path: None,
                     last_error: None,
                     retry_count: 0,
                 };
@@ -629,6 +665,8 @@ impl SyncEngine {
                         last_sync_at: None,
                         last_error: None,
                         retry_count: 0,
+                        trashed_at: None,
+                        trash_path: None,
                     };
                     state::upsert(&self.pool, &entry).await?;
                 }
@@ -663,6 +701,8 @@ impl SyncEngine {
                     remote_sha1: remote.and_then(|r| r.sha1.clone()),
                     remote_etag: remote.and_then(|r| r.etag.clone()),
                     remote_version_id: None,
+                    trashed_at: None,
+                    trash_path: None,
                     remote_modified_at: remote.and_then(|r| r.modified_at.clone()),
                     local_modified_at: local.map(|l| l.modified_at.clone()),
                     local_size: local.map(|l| l.size as i64),

@@ -22,6 +22,8 @@ pub struct SyncEntry {
     pub last_sync_at: Option<String>,
     pub last_error: Option<String>,
     pub retry_count: i64,
+    pub trashed_at: Option<String>,
+    pub trash_path: Option<String>,
 }
 
 impl SyncEntry {
@@ -44,17 +46,20 @@ impl SyncEntry {
             last_sync_at: row.get("last_sync_at"),
             last_error: row.get("last_error"),
             retry_count: row.get("retry_count"),
+            trashed_at: row.get("trashed_at"),
+            trash_path: row.get("trash_path"),
         }
     }
 }
 
 /// Get all sync entries for a given sync root.
 pub async fn get_all_for_root(pool: &SqlitePool, root_index: i64) -> Result<Vec<SyncEntry>> {
-    let rows = sqlx::query("SELECT * FROM sync_entries WHERE sync_root_index = ?")
-        .bind(root_index)
-        .fetch_all(pool)
-        .await
-        .context("Failed to fetch sync entries")?;
+    let rows =
+        sqlx::query("SELECT * FROM sync_entries WHERE sync_root_index = ? AND trashed_at IS NULL")
+            .bind(root_index)
+            .fetch_all(pool)
+            .await
+            .context("Failed to fetch sync entries")?;
 
     Ok(rows.iter().map(SyncEntry::from_row).collect())
 }
@@ -85,8 +90,9 @@ pub async fn upsert(pool: &SqlitePool, e: &SyncEntry) -> Result<i64> {
             sync_root_index, box_id, box_parent_id, entry_type, relative_path,
             local_sha1, remote_sha1, remote_etag, remote_version_id,
             remote_modified_at, local_modified_at, local_size,
-            sync_status, last_sync_at, last_error, retry_count
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            sync_status, last_sync_at, last_error, retry_count,
+            trashed_at, trash_path
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
         ON CONFLICT(sync_root_index, relative_path) DO UPDATE SET
             box_id = excluded.box_id,
             box_parent_id = excluded.box_parent_id,
@@ -101,7 +107,9 @@ pub async fn upsert(pool: &SqlitePool, e: &SyncEntry) -> Result<i64> {
             sync_status = excluded.sync_status,
             last_sync_at = excluded.last_sync_at,
             last_error = excluded.last_error,
-            retry_count = excluded.retry_count"#,
+            retry_count = excluded.retry_count,
+            trashed_at = NULL,
+            trash_path = NULL"#,
     )
     .bind(e.sync_root_index)
     .bind(&e.box_id)
@@ -194,6 +202,38 @@ pub async fn find_root_by_box_id(pool: &SqlitePool, box_id: &str) -> Result<Opti
             .fetch_optional(pool)
             .await?;
     Ok(row.map(|r| r.0))
+}
+
+/// Mark an entry as trashed (moved to local trash bin).
+pub async fn mark_trashed(pool: &SqlitePool, entry_id: i64, trash_path_str: &str) -> Result<()> {
+    let now = chrono::Utc::now().to_rfc3339();
+    sqlx::query("UPDATE sync_entries SET trashed_at = ?, trash_path = ? WHERE id = ?")
+        .bind(&now)
+        .bind(trash_path_str)
+        .bind(entry_id)
+        .execute(pool)
+        .await
+        .context("Failed to mark entry as trashed")?;
+    Ok(())
+}
+
+/// Get trash entries whose retention period has expired.
+pub async fn get_expired_trash(
+    pool: &SqlitePool,
+    root_index: i64,
+    cutoff_rfc3339: &str,
+) -> Result<Vec<SyncEntry>> {
+    let rows = sqlx::query(
+        "SELECT * FROM sync_entries \
+         WHERE sync_root_index = ? AND trashed_at IS NOT NULL AND trashed_at < ?",
+    )
+    .bind(root_index)
+    .bind(cutoff_rfc3339)
+    .fetch_all(pool)
+    .await
+    .context("Failed to fetch expired trash entries")?;
+
+    Ok(rows.iter().map(SyncEntry::from_row).collect())
 }
 
 /// Set stream position for a sync root.

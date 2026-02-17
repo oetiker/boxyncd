@@ -4,6 +4,8 @@
 
 ### New
 
+- Add optional local trash bin for remote-initiated deletions: when a file is removed on Box, the local copy is moved to a configurable trash directory (`remote_trash_path`) instead of being permanently deleted, with automatic cleanup after a configurable retention period (`remote_trash_days`)
+
 ### Changed
 
 ### Fixed
