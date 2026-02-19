@@ -4,8 +4,15 @@
 
 ### New
 
-- Sync file timestamps between local and Box: downloads now preserve the remote `content_modified_at` as the local mtime, and initial consolidation picks the older timestamp pushing it to whichever side is newer
+### Changed
 
+### Fixed
+
+## 0.6.0 - 2026-02-19
+
+### New
+
+- Sync file timestamps between local and Box: downloads now preserve the remote `content_modified_at` as the local mtime, and initial consolidation picks the older timestamp pushing it to whichever side is newer
 ### Changed
 
 ### Fixed
