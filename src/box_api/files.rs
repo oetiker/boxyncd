@@ -192,6 +192,37 @@ impl BoxClient {
             .context("Upload response contained no file entries")
     }
 
+    /// Update file metadata (e.g. `content_modified_at`) without re-uploading content.
+    pub async fn update_file_info(
+        &self,
+        file_id: &str,
+        content_modified_at: &str,
+    ) -> Result<BoxFile> {
+        #[derive(serde::Serialize)]
+        struct UpdateBody {
+            content_modified_at: String,
+        }
+
+        let resp = self
+            .api_request(
+                Method::PUT,
+                &format!(
+                    "/files/{file_id}?fields=id,name,etag,sha1,size,\
+                     modified_at,content_modified_at,parent,file_version,item_status"
+                ),
+            )
+            .json(&UpdateBody {
+                content_modified_at: content_modified_at.to_string(),
+            })
+            .send()
+            .await
+            .with_context(|| format!("Failed to update file info {file_id}"))?;
+
+        resp.json()
+            .await
+            .context("Failed to parse update file info response")
+    }
+
     /// Delete a file on Box.
     pub async fn delete_file(&self, file_id: &str, etag: Option<&str>) -> Result<()> {
         let mut req = self.api_request(Method::DELETE, &format!("/files/{file_id}"));

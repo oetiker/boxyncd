@@ -344,17 +344,7 @@ impl SyncEngine {
                 .execute_action(action, root_index, base_path, &remote_by_path, local_tree)
                 .await
             {
-                Ok(()) => {
-                    if matches!(
-                        action,
-                        SyncAction::Upload { .. }
-                            | SyncAction::UploadVersion { .. }
-                            | SyncAction::DeleteRemote { .. }
-                            | SyncAction::CreateRemoteDir { .. }
-                    ) {
-                        outcome.modified_remote = true;
-                    }
-                }
+                Ok(action_outcome) => outcome.merge(action_outcome),
                 Err(e) => {
                     tracing::error!(error = format!("{e:#}"), action = ?action, "action failed");
                     if let Some(path) = action_path(action)
@@ -370,7 +360,7 @@ impl SyncEngine {
         Ok(outcome)
     }
 
-    /// Execute a single sync action.
+    /// Execute a single sync action, returning whether remote was modified.
     async fn execute_action(
         &self,
         action: &SyncAction,
@@ -378,7 +368,8 @@ impl SyncEngine {
         base_path: &Path,
         remote_by_path: &std::collections::HashMap<&str, &RemoteEntry>,
         local_tree: &[LocalEntry],
-    ) -> Result<()> {
+    ) -> Result<SyncOutcome> {
+        let mut outcome = SyncOutcome::default();
         match action {
             SyncAction::Download {
                 relative_path,
@@ -418,6 +409,7 @@ impl SyncEngine {
                     root_index,
                 )
                 .await?;
+                outcome.modified_remote = true;
             }
 
             SyncAction::UploadVersion {
@@ -436,6 +428,7 @@ impl SyncEngine {
                     root_index,
                 )
                 .await?;
+                outcome.modified_remote = true;
             }
 
             SyncAction::DeleteLocal { relative_path } => {
@@ -526,6 +519,7 @@ impl SyncEngine {
                     let entry_id: i64 = row.get("id");
                     state::delete_entry(&self.pool, entry_id).await?;
                 }
+                outcome.modified_remote = true;
             }
 
             SyncAction::CreateLocalDir { relative_path } => {
@@ -603,6 +597,7 @@ impl SyncEngine {
                     retry_count: 0,
                 };
                 state::upsert(&self.pool, &entry).await?;
+                outcome.modified_remote = true;
             }
 
             SyncAction::Conflict {
@@ -685,17 +680,74 @@ impl SyncEngine {
                     .iter()
                     .find(|e| e.relative_path == *relative_path);
 
+                let is_file = !local.is_some_and(|l| l.is_dir);
+
+                // Timestamp consolidation for files: keep the older timestamp
+                // on both sides so mtime stays consistent.
+                let mut final_local_mtime = local.map(|l| l.modified_at.clone());
+                let mut final_remote_mtime = remote.and_then(|r| r.modified_at.clone());
+
+                if is_file {
+                    if let (Some(local_ts), Some(remote_ts)) = (
+                        local.and_then(|l| {
+                            chrono::DateTime::parse_from_rfc3339(&l.modified_at).ok()
+                        }),
+                        remote.and_then(|r| {
+                            r.modified_at
+                                .as_deref()
+                                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                        }),
+                    ) {
+                        if remote_ts < local_ts {
+                            // Remote is older — pull it to local
+                            let full_path = base_path.join(relative_path);
+                            let ts_str =
+                                remote.and_then(|r| r.modified_at.clone()).unwrap_or_default();
+                            downloader::set_file_mtime(&full_path, &ts_str)?;
+                            // Re-read local mtime after adjustment
+                            let local_meta = tokio::fs::metadata(&full_path).await?;
+                            let dur = local_meta
+                                .modified()?
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default();
+                            final_local_mtime = Some(
+                                chrono::DateTime::from_timestamp(
+                                    dur.as_secs() as i64,
+                                    dur.subsec_nanos(),
+                                )
+                                .unwrap_or_default()
+                                .to_rfc3339(),
+                            );
+                            tracing::debug!(
+                                path = %relative_path,
+                                "consolidated: set local mtime to older remote timestamp"
+                            );
+                        } else if local_ts < remote_ts {
+                            // Local is older — push it to Box
+                            if let Some(r) = remote {
+                                let ts_str = local
+                                    .map(|l| l.modified_at.clone())
+                                    .unwrap_or_default();
+                                self.client
+                                    .update_file_info(&r.box_id, &ts_str)
+                                    .await?;
+                                final_remote_mtime = Some(ts_str);
+                                outcome.modified_remote = true;
+                                tracing::debug!(
+                                    path = %relative_path,
+                                    "consolidated: set remote mtime to older local timestamp"
+                                );
+                            }
+                        }
+                    }
+                }
+
                 let entry = SyncEntry {
                     id: 0,
                     sync_root_index: root_index,
                     box_id: remote.map(|r| r.box_id.clone()),
                     box_parent_id: remote.map(|r| r.parent_id.clone()),
-                    entry_type: if local.is_some_and(|l| l.is_dir) {
-                        "folder"
-                    } else {
-                        "file"
-                    }
-                    .into(),
+                    entry_type: if !is_file { "folder" } else { "file" }.into(),
                     relative_path: relative_path.clone(),
                     local_sha1: local.and_then(|l| l.sha1.clone()),
                     remote_sha1: remote.and_then(|r| r.sha1.clone()),
@@ -703,8 +755,8 @@ impl SyncEngine {
                     remote_version_id: None,
                     trashed_at: None,
                     trash_path: None,
-                    remote_modified_at: remote.and_then(|r| r.modified_at.clone()),
-                    local_modified_at: local.map(|l| l.modified_at.clone()),
+                    remote_modified_at: final_remote_mtime,
+                    local_modified_at: final_local_mtime,
                     local_size: local.map(|l| l.size as i64),
                     sync_status: "synced".into(),
                     last_sync_at: None,
@@ -715,7 +767,7 @@ impl SyncEngine {
             }
         }
 
-        Ok(())
+        Ok(outcome)
     }
 
     /// Resolve the Box parent folder ID for a given relative path.
@@ -1122,17 +1174,7 @@ impl SyncEngine {
             .execute_action(action, root_index, base_path, &remote_by_path, &local_vec)
             .await
         {
-            Ok(()) => {
-                if matches!(
-                    action,
-                    SyncAction::Upload { .. }
-                        | SyncAction::UploadVersion { .. }
-                        | SyncAction::DeleteRemote { .. }
-                        | SyncAction::CreateRemoteDir { .. }
-                ) {
-                    outcome.modified_remote = true;
-                }
-            }
+            Ok(action_outcome) => outcome.merge(action_outcome),
             Err(e) => {
                 tracing::error!(error = format!("{e:#}"), action = ?action, "targeted action failed");
                 if let Some(path) = action_path(action)

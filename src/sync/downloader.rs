@@ -8,6 +8,23 @@ use crate::util::hash;
 
 use super::state::{self, SyncEntry};
 
+/// Set a local file's mtime to match an RFC 3339 timestamp (e.g. from Box's
+/// `content_modified_at`).  Uses `File::set_times()` (stable since Rust 1.75).
+pub(super) fn set_file_mtime(path: &Path, rfc3339: &str) -> Result<()> {
+    let dt = chrono::DateTime::parse_from_rfc3339(rfc3339)
+        .with_context(|| format!("Invalid RFC 3339 timestamp: {rfc3339}"))?;
+    let system_time = std::time::UNIX_EPOCH
+        + std::time::Duration::new(dt.timestamp() as u64, dt.timestamp_subsec_nanos());
+    let times = std::fs::FileTimes::new().set_modified(system_time);
+    let file = std::fs::File::options()
+        .write(true)
+        .open(path)
+        .with_context(|| format!("Cannot open {} to set mtime", path.display()))?;
+    file.set_times(times)
+        .with_context(|| format!("Failed to set mtime on {}", path.display()))?;
+    Ok(())
+}
+
 /// Download a file from Box and record the synced state in the DB.
 ///
 /// Writes to a `.boxyncd.tmp` file first, then renames for atomicity.
@@ -40,6 +57,11 @@ pub async fn download_and_record(
         .get_file(box_id)
         .await
         .with_context(|| format!("Failed to get metadata for {box_id}"))?;
+
+    // Set local mtime to match Box's content_modified_at
+    if let Some(ref remote_mtime) = remote_file.content_modified_at {
+        set_file_mtime(&dest, remote_mtime)?;
+    }
 
     // Compute local SHA-1
     let local_sha1 = hash::compute_sha1(&dest).await?;
