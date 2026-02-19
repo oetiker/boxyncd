@@ -202,3 +202,15 @@ jobs:
           fail_on_unmatched_files: true
           draft: false
           prerelease: false
+
+  deploy-docs:
+    name: Deploy Versioned Docs
+    needs: [version, create-release]
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Trigger docs workflow
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run docs.yml -R ${{ github.repository }} -f tag=${{ needs.version.outputs.tag }}

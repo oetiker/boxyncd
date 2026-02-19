@@ -8,6 +8,8 @@
 
 ### Fixed
 
+- Fix versioned docs not deploying on release (tag pushes from `GITHUB_TOKEN` are suppressed by GitHub; use `workflow_dispatch` instead)
+
 ## 0.6.1 - 2026-02-19
 
 ### Fixed
