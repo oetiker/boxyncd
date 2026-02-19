@@ -8,8 +8,11 @@
 
 ### Fixed
 
-- Fix timestamp consolidation not applying to files synced before v0.6.0 (retroactive fixup on first full sync)
+## 0.6.1 - 2026-02-19
 
+### Fixed
+
+- Fix timestamp consolidation not applying to files synced before v0.6.0 (retroactive fixup on first full sync)
 ## 0.6.0 - 2026-02-19
 
 ### New
