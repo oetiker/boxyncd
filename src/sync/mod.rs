@@ -152,15 +152,124 @@ impl SyncEngine {
 
         // 4. Reconcile
         let actions = reconciler::reconcile(&local_tree, &remote_tree, &db_entries);
-        if actions.is_empty() {
+        let mut outcome = if actions.is_empty() {
             tracing::info!("everything in sync");
-            return Ok(SyncOutcome::default());
-        }
-        tracing::info!(count = actions.len(), "actions to execute");
+            SyncOutcome::default()
+        } else {
+            tracing::info!(count = actions.len(), "actions to execute");
+            // 5. Execute actions
+            self.execute_actions(root_index, &actions, base_path, &remote_tree, &local_tree)
+                .await?
+        };
 
-        // 5. Execute actions
-        self.execute_actions(root_index, &actions, base_path, &remote_tree, &local_tree)
-            .await
+        // 6. Fixup timestamps for already-synced files whose local mtime
+        //    doesn't match Box's content_modified_at (e.g. files synced
+        //    before timestamp preservation was added).
+        let fixup = self
+            .fixup_timestamps(root_index, base_path, &db_entries, &remote_tree, &local_tree)
+            .await?;
+        outcome.merge(fixup);
+
+        Ok(outcome)
+    }
+
+    /// Fix up timestamps for already-synced files where the local mtime doesn't
+    /// match Box's `content_modified_at`.  Keeps the older timestamp, pushing it
+    /// to whichever side is newer.  This handles files that were synced before
+    /// timestamp preservation was added.
+    async fn fixup_timestamps(
+        &self,
+        _root_index: i64,
+        base_path: &Path,
+        db_entries: &[SyncEntry],
+        remote_tree: &[RemoteEntry],
+        local_tree: &[LocalEntry],
+    ) -> Result<SyncOutcome> {
+        let remote_by_path: std::collections::HashMap<&str, &RemoteEntry> = remote_tree
+            .iter()
+            .map(|e| (e.relative_path.as_str(), e))
+            .collect();
+        let local_by_path: std::collections::HashMap<&str, &LocalEntry> = local_tree
+            .iter()
+            .map(|e| (e.relative_path.as_str(), e))
+            .collect();
+
+        let mut outcome = SyncOutcome::default();
+        let mut fixed = 0u64;
+
+        for db in db_entries {
+            if db.entry_type != "file" || db.sync_status != "synced" {
+                continue;
+            }
+
+            let Some(remote) = remote_by_path.get(db.relative_path.as_str()) else {
+                continue;
+            };
+            let Some(local) = local_by_path.get(db.relative_path.as_str()) else {
+                continue;
+            };
+
+            let Some(remote_ts) = remote
+                .modified_at
+                .as_deref()
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            else {
+                continue;
+            };
+            let Ok(local_ts) = chrono::DateTime::parse_from_rfc3339(&local.modified_at) else {
+                continue;
+            };
+
+            if remote_ts == local_ts {
+                continue;
+            }
+
+            let path = &db.relative_path;
+
+            if remote_ts < local_ts {
+                // Remote is older — set local mtime to match
+                let full_path = base_path.join(path);
+                let ts_str = remote.modified_at.as_deref().unwrap_or_default();
+                downloader::set_file_mtime(&full_path, ts_str)?;
+                // Re-read local mtime and update DB
+                let local_meta = tokio::fs::metadata(&full_path).await?;
+                let dur = local_meta
+                    .modified()?
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default();
+                let new_local_mtime =
+                    chrono::DateTime::from_timestamp(dur.as_secs() as i64, dur.subsec_nanos())
+                        .unwrap_or_default()
+                        .to_rfc3339();
+                let mut entry = db.clone();
+                entry.local_modified_at = Some(new_local_mtime);
+                state::upsert(&self.pool, &entry).await?;
+                fixed += 1;
+                tracing::debug!(path = %path, "fixup: set local mtime to older remote timestamp");
+            } else {
+                // Local is older — push to Box
+                if let Some(ref box_id) = db.box_id {
+                    self.client
+                        .update_file_info(box_id, &local.modified_at)
+                        .await?;
+                    let mut entry = db.clone();
+                    entry.remote_modified_at = Some(local.modified_at.clone());
+                    state::upsert(&self.pool, &entry).await?;
+                    outcome.modified_remote = true;
+                    fixed += 1;
+                    tracing::debug!(
+                        path = %path,
+                        "fixup: set remote mtime to older local timestamp"
+                    );
+                }
+            }
+        }
+
+        if fixed > 0 {
+            tracing::info!(count = fixed, "timestamps consolidated");
+        }
+
+        Ok(outcome)
     }
 
     /// Walk the remote Box folder tree concurrently, building a flat list of RemoteEntry.
