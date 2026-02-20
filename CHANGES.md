@@ -8,8 +8,11 @@
 
 ### Fixed
 
-- Fix `service install` ignoring `-c` config path flag (the generated service definition now embeds the custom config path)
+## 0.7.1 - 2026-02-20
 
+### Fixed
+
+- Fix `service install` ignoring `-c` config path flag (the generated service definition now embeds the custom config path)
 ## 0.7.0 - 2026-02-20
 
 ### New
