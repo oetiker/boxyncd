@@ -16,8 +16,44 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  wait-for-ci:
+    name: Wait for CI
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wait for CI to pass
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const deadline = Date.now() + 180_000;
+            while (Date.now() < deadline) {
+              const runs = await github.rest.actions.listWorkflowRuns({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                workflow_id: 'ci.yml',
+                branch: 'main',
+                per_page: 1,
+              });
+              const run = runs.data.workflow_runs[0];
+              if (!run) {
+                core.info('No CI runs found yet, waiting...');
+              } else {
+                core.info(`CI: status=${run.status} conclusion=${run.conclusion}`);
+                if (run.status === 'completed') {
+                  if (run.conclusion === 'success') {
+                    core.info('CI passed!');
+                    return;
+                  }
+                  core.setFailed(`CI ${run.conclusion} — aborting release`);
+                  return;
+                }
+              }
+              await new Promise(r => setTimeout(r, 10_000));
+            }
+            core.setFailed('Timed out waiting for CI after 3 minutes');
+
   version:
     name: Bump Version
+    needs: wait-for-ci
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -29,43 +65,38 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Verify main branch
-        run: |
-          if [ "${{ github.ref }}" != "refs/heads/main" ]; then
-            echo "::error::Releases must be created from the main branch"
-            exit 1
-          fi
-
       - name: Calculate new version
         id: version
-        run: |
-          # Get latest tag or default to v0.0.0
-          LATEST=$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' | sort -V | tail -1 || echo "v0.0.0")
-          if [ -z "$LATEST" ]; then
-            LATEST="v0.0.0"
-          fi
-
-          # Parse version components
-          MAJOR=$(echo "$LATEST" | sed 's/v\([0-9]*\)\.\([0-9]*\)\.\([0-9]*\)/\1/')
-          MINOR=$(echo "$LATEST" | sed 's/v\([0-9]*\)\.\([0-9]*\)\.\([0-9]*\)/\2/')
-          PATCH=$(echo "$LATEST" | sed 's/v\([0-9]*\)\.\([0-9]*\)\.\([0-9]*\)/\3/')
-
-          # Calculate new version based on release type
-          case "${{ inputs.release_type }}" in
-            major)
-              NEW_VERSION="$((MAJOR+1)).0.0"
-              ;;
-            feature)
-              NEW_VERSION="${MAJOR}.$((MINOR+1)).0"
-              ;;
-            bugfix)
-              NEW_VERSION="${MAJOR}.${MINOR}.$((PATCH+1))"
-              ;;
-          esac
-
-          echo "version=${NEW_VERSION}" >> $GITHUB_OUTPUT
-          echo "tag=v${NEW_VERSION}" >> $GITHUB_OUTPUT
-          echo "New version: ${NEW_VERSION}"
+        uses: actions/github-script@v7
+        with:
+          script: |
+            if (context.ref !== 'refs/heads/main') {
+              core.setFailed('Releases must be created from the main branch');
+              return;
+            }
+            const tags = await github.rest.repos.listTags({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              per_page: 100,
+            });
+            const latest = tags.data
+              .map(t => t.name)
+              .filter(t => /^v\d+\.\d+\.\d+$/.test(t))
+              .sort((a, b) => {
+                const pa = a.slice(1).split('.').map(Number);
+                const pb = b.slice(1).split('.').map(Number);
+                return pa[0] - pb[0] || pa[1] - pb[1] || pa[2] - pb[2];
+              })
+              .pop() || 'v0.0.0';
+            let [major, minor, patch] = latest.slice(1).split('.').map(Number);
+            const type = '${{ inputs.release_type }}';
+            if (type === 'major') { major++; minor = 0; patch = 0; }
+            else if (type === 'feature') { minor++; patch = 0; }
+            else { patch++; }
+            const version = `${major}.${minor}.${patch}`;
+            core.setOutput('version', version);
+            core.setOutput('tag', `v${version}`);
+            core.info(`New version: ${version}`);
 
       - name: Update Cargo.toml version
         run: |
@@ -211,6 +242,13 @@ jobs:
       actions: write
     steps:
       - name: Trigger docs workflow
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh workflow run docs.yml -R ${{ github.repository }} -f tag=${{ needs.version.outputs.tag }}
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'docs.yml',
+              ref: 'main',
+              inputs: { tag: '${{ needs.version.outputs.tag }}' },
+            });

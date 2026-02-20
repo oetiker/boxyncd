@@ -6,6 +6,9 @@
 
 ### Changed
 
+- Release workflow now waits for CI to pass before proceeding (3 min timeout)
+- Replace shell scripts with `actions/github-script` for GitHub API interactions in release workflow
+
 ### Fixed
 
 - Fix versioned docs not deploying on release (tag pushes from `GITHUB_TOKEN` are suppressed by GitHub; use `workflow_dispatch` instead)
