@@ -32,7 +32,7 @@ This means the remote may have commits you don't have locally.
 ## Architecture
 
 - `src/main.rs` — CLI entry point (clap), daemon event loop
-- `src/service.rs` — `boxyncd service install/uninstall/status/log` (systemd integration, no config needed)
+- `src/service/` — `boxyncd service install/uninstall/status/log` (systemd on Linux, SMF on illumos; compile-time dispatch, no config needed)
 - `src/auth/` — OAuth flow, token management
 - `src/box_api/` — Box.com REST API client
 - `src/sync/` — three-way merge engine, reconciler, local/remote watchers, up/downloaders
@@ -43,7 +43,7 @@ This means the remote may have commits you don't have locally.
 ## Key design decisions
 
 - `Service` commands are handled before `config::load_config()` — they don't need Box credentials
-- `service.rs` sets `XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS` so `systemctl --user` works in SSH sessions
+- `service/systemd.rs` sets `XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS` so `systemctl --user` works in SSH sessions
 - `boxyncd service log` execs into journalctl (replaces the process) via `CommandExt::exec()`
 - Conflict resolution: local keeps the original filename, remote is saved as a timestamped conflict copy
 - Zero external dependencies for systemd integration — uses `std::process::Command` and `std::os::unix`

@@ -44,7 +44,7 @@ enum Command {
     SyncNow,
     /// Validate config, auth, and connectivity; preview sync actions without making changes
     DryRun,
-    /// Manage the systemd user service
+    /// Manage the system service
     Service {
         #[command(subcommand)]
         action: ServiceAction,
@@ -53,9 +53,9 @@ enum Command {
 
 #[derive(Subcommand)]
 enum ServiceAction {
-    /// Install and enable the systemd user service
+    /// Install and enable the system service
     Install,
-    /// Stop and remove the systemd user service
+    /// Stop and remove the system service
     Uninstall,
     /// Show service status
     Status,

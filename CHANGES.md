@@ -4,6 +4,8 @@
 
 ### New
 
+- Add illumos SMF (Service Management Facility) support for `boxyncd service` subcommands, selected at compile time alongside the existing systemd backend
+
 ### Changed
 
 ### Fixed
