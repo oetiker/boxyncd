@@ -166,7 +166,13 @@ impl SyncEngine {
         //    doesn't match Box's content_modified_at (e.g. files synced
         //    before timestamp preservation was added).
         let fixup = self
-            .fixup_timestamps(root_index, base_path, &db_entries, &remote_tree, &local_tree)
+            .fixup_timestamps(
+                root_index,
+                base_path,
+                &db_entries,
+                &remote_tree,
+                &local_tree,
+            )
             .await?;
         outcome.merge(fixup);
 
@@ -810,8 +816,9 @@ impl SyncEngine {
                         if remote_ts < local_ts {
                             // Remote is older — pull it to local
                             let full_path = base_path.join(relative_path);
-                            let ts_str =
-                                remote.and_then(|r| r.modified_at.clone()).unwrap_or_default();
+                            let ts_str = remote
+                                .and_then(|r| r.modified_at.clone())
+                                .unwrap_or_default();
                             downloader::set_file_mtime(&full_path, &ts_str)?;
                             // Re-read local mtime after adjustment
                             let local_meta = tokio::fs::metadata(&full_path).await?;
@@ -834,12 +841,9 @@ impl SyncEngine {
                         } else if local_ts < remote_ts {
                             // Local is older — push it to Box
                             if let Some(r) = remote {
-                                let ts_str = local
-                                    .map(|l| l.modified_at.clone())
-                                    .unwrap_or_default();
-                                self.client
-                                    .update_file_info(&r.box_id, &ts_str)
-                                    .await?;
+                                let ts_str =
+                                    local.map(|l| l.modified_at.clone()).unwrap_or_default();
+                                self.client.update_file_info(&r.box_id, &ts_str).await?;
                                 final_remote_mtime = Some(ts_str);
                                 outcome.modified_remote = true;
                                 tracing::debug!(
