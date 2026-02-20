@@ -93,11 +93,21 @@ By comparing all three, boxyncd determines the correct action for each file:
 | Changed | Changed (same) | Known | Record synced |
 | New | Missing | Missing | Upload |
 | Missing | New | Missing | Download |
-| Deleted | Unchanged | Known | Delete remote |
+| Deleted | Unchanged | Known | Trash remote |
 | Deleted | Changed | Known | Download (remote wins) |
-| Unchanged | Deleted | Known | Delete local |
-| Changed | Deleted | Known | Upload (local wins) |
-| Deleted | Deleted | Known | Remove from DB |
+| Unchanged | Trashed / Deleted | Known | Delete local (or move to trash) |
+| Changed | Trashed / Deleted | Known | Upload (local wins) |
+| Deleted | Trashed / Deleted | Known | Remove from DB |
+
+**Note:** "Trash remote" means the file is moved to the Box Trash Bin via the Box API — it is not permanently deleted. You can restore it from the Box Trash if needed. Similarly, "Trashed / Deleted" on the remote side means Box reports the file as trashed (e.g. deleted in the Box web UI or app).
+
+### Local Trash Bin
+
+When you delete a file in the Box web UI or app, Box moves it to its own Trash Bin (it is not permanently gone). boxyncd detects this trashed status and by default deletes the local copy. When `remote_trash_path` is configured on a sync root, the local copy is moved into the local trash directory instead of being permanently deleted. Files are kept for `remote_trash_days` (default 30) and then cleaned up automatically. See [Configuration](configuration.md#local-trash-bin) for details.
+
+### Timestamp Syncing
+
+boxyncd preserves file timestamps across both sides. Downloaded files keep the remote `content_modified_at` as their local modification time. On the first sync after upgrading to v0.6.0+, boxyncd consolidates timestamps: for each file it picks the older timestamp and pushes it to whichever side is newer, so both local and remote end up with a consistent modification time.
 
 ### Conflict Resolution
 

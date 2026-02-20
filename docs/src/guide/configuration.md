@@ -21,6 +21,8 @@ max_concurrent_transfers = 4
 local_path = "/home/user/BoxSync"
 box_folder_id = "0"
 exclude = ["*.tmp", ".git/**", "node_modules/**"]
+remote_trash_path = ".trash"
+remote_trash_days = 30
 ```
 
 ### Settings
@@ -43,8 +45,19 @@ Each `[[sync]]` block maps a local directory to a Box folder:
 - `local_path` - Absolute path to local directory
 - `box_folder_id` - Box folder ID (`"0"` for account root)
 - `exclude` - Glob patterns for files to ignore
+- `remote_trash_path` - Directory for trashed files (optional, see below)
+- `remote_trash_days` - Days to keep trashed files before permanent deletion (default: 30)
 
 You can define multiple sync roots to sync different folder pairs.
+
+### Local Trash Bin
+
+When a file is moved to the Box.com Trash Bin (i.e. deleted in the Box web UI or app), boxyncd normally deletes the local copy too. By setting `remote_trash_path`, you can have boxyncd move those files into a local trash directory instead. This mirrors Box.com's own Trash Bin but on the local side.
+
+- Only **remote-initiated deletions** are affected — files you delete locally still propagate to Box normally.
+- The path can be absolute or relative to `local_path`. When it falls inside the sync tree, it is automatically excluded from syncing.
+- Trashed files are organized in date-stamped subdirectories (e.g. `.trash/2026-02-19/report.pdf`).
+- After `remote_trash_days` (default 30), trashed files are permanently deleted at the end of the next sync cycle.
 
 ### Custom Box App (optional)
 
