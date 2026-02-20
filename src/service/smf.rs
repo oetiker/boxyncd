@@ -15,8 +15,12 @@ fn manifest_path() -> Result<PathBuf> {
     Ok(manifest_dir()?.join("boxyncd.xml"))
 }
 
-fn generate_manifest(exe_path: &std::path::Path) -> String {
+fn generate_manifest(exe_path: &std::path::Path, config_path: Option<&std::path::Path>) -> String {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
+    let exec_start = match config_path {
+        Some(cfg) => format!("{} -c {} start", exe_path.display(), cfg.display()),
+        None => format!("{} start", exe_path.display()),
+    };
     format!(
         r#"<?xml version="1.0"?>
 <!DOCTYPE service_bundle SYSTEM "/usr/share/lib/xml/dtd/service_bundle.dtd.1">
@@ -30,7 +34,7 @@ fn generate_manifest(exe_path: &std::path::Path) -> String {
     </dependency>
 
     <exec_method type="method" name="start"
-      exec="{exe} start"
+      exec="{exec_start}"
       timeout_seconds="60">
       <method_context>
         <method_environment>
@@ -56,7 +60,6 @@ fn generate_manifest(exe_path: &std::path::Path) -> String {
   </service>
 </service_bundle>
 "#,
-        exe = exe_path.display(),
         home = home,
     )
 }
@@ -71,9 +74,9 @@ fn run_cmd(cmd: &mut Command, description: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn install() -> Result<()> {
+pub fn install(config_path: Option<&std::path::Path>) -> Result<()> {
     let exe = std::env::current_exe().context("cannot determine path to current executable")?;
-    let manifest = generate_manifest(&exe);
+    let manifest = generate_manifest(&exe, config_path);
 
     let dir = manifest_dir()?;
     std::fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;

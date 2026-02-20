@@ -51,7 +51,11 @@ fn service_file_path() -> Result<PathBuf> {
     Ok(service_dir()?.join("boxyncd.service"))
 }
 
-fn generate_unit_file(exe_path: &Path) -> String {
+fn generate_unit_file(exe_path: &Path, config_path: Option<&Path>) -> String {
+    let exec_start = match config_path {
+        Some(cfg) => format!("{} -c {} start", exe_path.display(), cfg.display()),
+        None => format!("{} start", exe_path.display()),
+    };
     format!(
         "[Unit]\n\
          Description=Bidirectional Box.com file sync daemon\n\
@@ -60,7 +64,7 @@ fn generate_unit_file(exe_path: &Path) -> String {
          \n\
          [Service]\n\
          Type=simple\n\
-         ExecStart={exe} start\n\
+         ExecStart={exec_start}\n\
          Restart=on-failure\n\
          RestartSec=10\n\
          KillSignal=SIGTERM\n\
@@ -69,7 +73,6 @@ fn generate_unit_file(exe_path: &Path) -> String {
          \n\
          [Install]\n\
          WantedBy=default.target\n",
-        exe = exe_path.display()
     )
 }
 
@@ -101,9 +104,9 @@ fn run_cmd(cmd: &mut Command, description: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn install() -> Result<()> {
+pub fn install(config_path: Option<&Path>) -> Result<()> {
     let exe = std::env::current_exe().context("cannot determine path to current executable")?;
-    let unit = generate_unit_file(&exe);
+    let unit = generate_unit_file(&exe, config_path);
 
     let dir = service_dir()?;
     std::fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;

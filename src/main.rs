@@ -198,7 +198,7 @@ async fn main() -> Result<()> {
     // Service commands don't need config
     if let Command::Service { action } = cli.command {
         return match action {
-            ServiceAction::Install => service::install(),
+            ServiceAction::Install => service::install(cli.config.as_deref()),
             ServiceAction::Uninstall => service::uninstall(),
             ServiceAction::Status => service::status(),
             ServiceAction::Log => service::log(),
